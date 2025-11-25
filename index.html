@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8" />
     <title>Simple Drawing Pad</title>
+    <!-- Prevent page zoom; we handle zoom ourselves on the canvas -->
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <style>
         * { box-sizing: border-box; }
         html, body {
@@ -86,6 +89,7 @@
             display: block;
             background: #fff;
             cursor: crosshair;
+            touch-action: none; /* hint for some browsers */
         }
         .text-editor-overlay {
             position: absolute;
@@ -101,16 +105,12 @@
 </head>
 <body>
 <div class="toolbar">
+    <span class="group-label">Tools:</span>
     <button data-tool="pen" class="active">Pen</button>
-    <button data-tool="text">Text</button>
-
-    <div class="divider"></div>
-
     <button data-tool="eraser">Eraser</button>
     <button data-tool="select">Select / Move</button>
+    <button data-tool="text">Text</button>
     <button data-tool="hand">Hand / Pan</button>
-
-    <div class="divider"></div>
 
     <div id="color-container" class="inline-group">
         <span class="group-label">Color:</span>
@@ -217,8 +217,9 @@
     // Tools and interaction state
     let currentTool = "pen";
     let isDrawing = false;
-    let isPanning = false;         // used for hand tool AND middle mouse
+    let isPanning = false;         // used for hand tool, middle mouse, and touch pan
     let isDraggingSelection = false;
+    let isPinching = false;        // touch pinch zoom
 
     let currentStroke = null;
 
@@ -228,6 +229,11 @@
 
     let panStartScreen = null;
     let panStartCamera = null;
+
+    // Pinch state
+    let pinchStartDistance = 0;
+    let pinchStartScale = 1;
+    let pinchCenterWorld = null;
 
     let eraseChanged = false;
     let moveChanged = false;
@@ -252,13 +258,11 @@
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight - toolbarHeight;
         render();
-    }
-    window.addEventListener("resize", () => {
-        resizeCanvas();
         if (currentTextEditor) {
             positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
         }
-    });
+    }
+    window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
 
     // UI: visibility helpers
@@ -723,7 +727,7 @@
         const sx = (shape.x - camera.x) * scale + rect.left;
         const sy = (shape.y - camera.y) * scale + rect.top - fontSizeScreen;
 
-        const width = Math.max(50, textWidth + 16); // minimal width with padding
+        const width = Math.max(50, textWidth + 16);
         const height = fontSizeScreen + 8;
 
         input.style.left = `${sx}px`;
@@ -752,7 +756,6 @@
         const commit = () => {
             const newVal = input.value.trim();
             if (newVal === "") {
-                // delete shape
                 const idx = shapes.indexOf(shape);
                 if (idx !== -1) shapes.splice(idx, 1);
                 if (selectedShape === shape) selectedShape = null;
@@ -782,31 +785,20 @@
         });
 
         input.addEventListener("blur", () => {
-            // If it already got destroyed via commit/cancel, skip
             if (!currentTextEditor || currentTextEditor.input !== input) return;
             commit();
         });
     }
 
-    // Mouse handling
-    canvas.addEventListener("mousedown", (e) => {
-        destroyTextEditor();
+    // Shared interaction helpers
+    function beginPan(screenX, screenY) {
+        isPanning = true;
+        panStartScreen = { x: screenX, y: screenY };
+        panStartCamera = { x: camera.x, y: camera.y };
+        canvas.style.cursor = "grabbing";
+    }
 
-        // Middle mouse: always pan
-        if (e.button === 1) {
-            e.preventDefault();
-            isPanning = true;
-            panStartScreen = { x: e.clientX, y: e.clientY };
-            panStartCamera = { x: camera.x, y: camera.y };
-            canvas.style.cursor = "grabbing";
-            return;
-        }
-
-        // Only handle left button for drawing/selecting
-        if (e.button !== 0) return;
-
-        const world = screenToWorld(e.clientX, e.clientY);
-
+    function handlePrimaryDownAtWorld(world, screenX, screenY) {
         if (currentTool === "pen") {
             isDrawing = true;
             currentStroke = {
@@ -860,16 +852,11 @@
                 render();
             }
         } else if (currentTool === "hand") {
-            isPanning = true;
-            panStartScreen = { x: e.clientX, y: e.clientY };
-            panStartCamera = { x: camera.x, y: camera.y };
-            canvas.style.cursor = "grabbing";
+            beginPan(screenX, screenY);
         }
-    });
+    }
 
-    canvas.addEventListener("mousemove", (e) => {
-        const world = screenToWorld(e.clientX, e.clientY);
-
+    function handlePointerMove(world, screenX, screenY) {
         if (currentTool === "pen" && isDrawing && currentStroke) {
             currentStroke.points.push(world);
             render();
@@ -894,16 +881,16 @@
             render();
         } else if (isPanning) {
             const scale = camera.scale || 1;
-            const dx = e.clientX - panStartScreen.x;
-            const dy = e.clientY - panStartScreen.y;
+            const dx = screenX - panStartScreen.x;
+            const dy = screenY - panStartScreen.y;
             camera.x = panStartCamera.x - dx / scale;
             camera.y = panStartCamera.y - dy / scale;
             render();
+            if (currentTextEditor) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+            }
         }
-    });
-
-    canvas.addEventListener("mouseup", stopAllInteractions);
-    canvas.addEventListener("mouseleave", stopAllInteractions);
+    }
 
     function stopAllInteractions() {
         if (currentTool === "pen" && isDrawing && currentStroke) {
@@ -923,6 +910,7 @@
         isDrawing = false;
         isPanning = false;
         isDraggingSelection = false;
+        isPinching = false;
         currentStroke = null;
         dragStartWorld = null;
         originalShapeData = null;
@@ -938,7 +926,33 @@
         }
     }
 
-    // Scroll wheel zoom
+    // Mouse handling
+    canvas.addEventListener("mousedown", (e) => {
+        destroyTextEditor();
+
+        // Middle mouse: always pan
+        if (e.button === 1) {
+            e.preventDefault();
+            beginPan(e.clientX, e.clientY);
+            return;
+        }
+
+        // Only handle left button for drawing/selecting
+        if (e.button !== 0) return;
+
+        const world = screenToWorld(e.clientX, e.clientY);
+        handlePrimaryDownAtWorld(world, e.clientX, e.clientY);
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+        const world = screenToWorld(e.clientX, e.clientY);
+        handlePointerMove(world, e.clientX, e.clientY);
+    });
+
+    canvas.addEventListener("mouseup", () => stopAllInteractions());
+    canvas.addEventListener("mouseleave", () => stopAllInteractions());
+
+    // Scroll wheel zoom (desktop)
     canvas.addEventListener("wheel", (e) => {
         e.preventDefault();
 
@@ -968,7 +982,104 @@
         }
     }, { passive: false });
 
-    // Double-click to edit text
+    // Touch helpers
+    function distanceTouches(t1, t2) {
+        const dx = t2.clientX - t1.clientX;
+        const dy = t2.clientY - t1.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // Touch handling (mobile)
+    canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        destroyTextEditor();
+
+        const touches = e.touches;
+        if (touches.length === 2) {
+            // Start pinch zoom
+            isPinching = true;
+            isDrawing = false;
+            isPanning = false;
+            isDraggingSelection = false;
+
+            const t1 = touches[0];
+            const t2 = touches[1];
+            pinchStartDistance = distanceTouches(t1, t2);
+            pinchStartScale = camera.scale || 1;
+
+            const centerX = (t1.clientX + t2.clientX) / 2;
+            const centerY = (t1.clientY + t2.clientY) / 2;
+            pinchCenterWorld = screenToWorld(centerX, centerY);
+            return;
+        }
+
+        if (touches.length === 1) {
+            const t = touches[0];
+            const world = screenToWorld(t.clientX, t.clientY);
+
+            // If hand tool, treat single finger as pan
+            if (currentTool === "hand") {
+                beginPan(t.clientX, t.clientY);
+            } else {
+                handlePrimaryDownAtWorld(world, t.clientX, t.clientY);
+            }
+        }
+    }, { passive: false });
+
+    canvas.addEventListener("touchmove", (e) => {
+        e.preventDefault();
+        const touches = e.touches;
+
+        if (isPinching && touches.length === 2) {
+            const t1 = touches[0];
+            const t2 = touches[1];
+            const currentDistance = distanceTouches(t1, t2);
+            if (pinchStartDistance <= 0) return;
+
+            let newScale = pinchStartScale * (currentDistance / pinchStartDistance);
+            const MIN_SCALE = 0.2;
+            const MAX_SCALE = 5;
+            newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+            camera.scale = newScale;
+
+            // Keep the pinch center world point under the midpoint of the two fingers
+            const centerX = (t1.clientX + t2.clientX) / 2;
+            const centerY = (t1.clientY + t2.clientY) / 2;
+            camera.x = pinchCenterWorld.x - (centerX - getCanvasRect().left) / newScale;
+            camera.y = pinchCenterWorld.y - (centerY - getCanvasRect().top) / newScale;
+
+            render();
+            if (currentTextEditor) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+            }
+            return;
+        }
+
+        if (touches.length === 1) {
+            const t = touches[0];
+            const world = screenToWorld(t.clientX, t.clientY);
+            handlePointerMove(world, t.clientX, t.clientY);
+        }
+    }, { passive: false });
+
+    canvas.addEventListener("touchend", (e) => {
+        e.preventDefault();
+        const touches = e.touches;
+        if (touches.length < 2) {
+            isPinching = false;
+        }
+        if (touches.length === 0) {
+            stopAllInteractions();
+        }
+    }, { passive: false });
+
+    canvas.addEventListener("touchcancel", (e) => {
+        e.preventDefault();
+        isPinching = false;
+        stopAllInteractions();
+    }, { passive: false });
+
+    // Double-click to edit text (desktop)
     canvas.addEventListener("dblclick", (e) => {
         const world = screenToWorld(e.clientX, e.clientY);
         const shape = hitTestShapes(world.x, world.y);
