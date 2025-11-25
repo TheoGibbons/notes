@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Simple Drawing Pad</title>
+    <style>
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+        .toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            border-bottom: 1px solid #ddd;
+            background: #fafafa;
+            font-size: 14px;
+        }
+        .toolbar button,
+        .toolbar select,
+        .toolbar input[type="color"],
+        .toolbar input[type="range"] {
+            border: 1px solid #ccc;
+            background: #fff;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .toolbar input[type="color"] {
+            padding: 0;
+            width: 36px;
+            height: 28px;
+        }
+        .toolbar input[type="range"] {
+            cursor: pointer;
+        }
+        .toolbar button.active {
+            background: #007bff;
+            color: #fff;
+            border-color: #007bff;
+        }
+        .toolbar select:disabled {
+            background: #f5f5f5;
+            color: #888;
+            cursor: default;
+        }
+        .toolbar .group-label {
+            font-weight: 600;
+            margin-right: 4px;
+        }
+        .toolbar .divider {
+            width: 1px;
+            height: 24px;
+            background: #ddd;
+            margin: 0 6px;
+        }
+        .toolbar .spacer {
+            flex: 1;
+        }
+        .toolbar .inline-group {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        #pen-size-container,
+        #color-container,
+        #text-size-container {
+            display: none;
+            align-items: center;
+            gap: 4px;
+        }
+        #canvas {
+            flex: 1;
+            display: block;
+            background: #fff;
+            cursor: crosshair;
+        }
+        .text-editor-overlay {
+            position: absolute;
+            border: 1px solid #007bff;
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-family: inherit;
+            box-shadow: 0 0 0 1px rgba(0,123,255,0.2);
+            outline: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+<div class="toolbar">
+    <button data-tool="pen" class="active">Pen</button>
+    <button data-tool="text">Text</button>
+
+    <div class="divider"></div>
+
+    <button data-tool="eraser">Eraser</button>
+    <button data-tool="select">Select / Move</button>
+    <button data-tool="hand">Hand / Pan</button>
+
+    <div class="divider"></div>
+
+    <div id="color-container" class="inline-group">
+        <span class="group-label">Color:</span>
+        <input type="color" id="pen-color" value="#000000" />
+    </div>
+
+    <div id="pen-size-container" class="inline-group">
+        <span class="group-label">Pen size:</span>
+        <input type="range" id="pen-size" min="1" max="20" value="2" />
+    </div>
+
+    <div id="text-size-container" class="inline-group">
+        <span class="group-label">Text size:</span>
+        <input type="range" id="text-size" min="8" max="72" value="20" />
+    </div>
+
+    <div class="divider"></div>
+
+    <span class="group-label">History:</span>
+    <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+    <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
+
+    <div class="divider"></div>
+
+    <span class="group-label">Export:</span>
+    <button id="export-png">PNG</button>
+    <button id="export-json">JSON</button>
+
+    <div class="divider"></div>
+
+    <span class="group-label">Local saves:</span>
+    <button id="save-local">Save</button>
+    <select id="load-local" title="Load saved drawing"></select>
+
+    <div class="spacer"></div>
+
+    <button id="clear">Clear</button>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const toolbarButtons = document.querySelectorAll(".toolbar button[data-tool]");
+    const clearButton = document.getElementById("clear");
+    const undoButton = document.getElementById("undo");
+    const redoButton = document.getElementById("redo");
+    const exportPngButton = document.getElementById("export-png");
+    const exportJsonButton = document.getElementById("export-json");
+    const saveLocalButton = document.getElementById("save-local");
+    const loadLocalSelect = document.getElementById("load-local");
+
+    const colorContainer = document.getElementById("color-container");
+    const penColorInput = document.getElementById("pen-color");
+    const penSizeContainer = document.getElementById("pen-size-container");
+    const penSizeInput = document.getElementById("pen-size");
+    const textSizeContainer = document.getElementById("text-size-container");
+    const textSizeInput = document.getElementById("text-size");
+
+    const STORAGE_KEY = "drawingPad_saves_v1";
+
+    // World / camera state (with zoom)
+    let camera = { x: 0, y: 0, scale: 1 };
+
+    // Shapes
+    // stroke: { type: 'stroke', points: [{x,y},...], color, width }
+    // text:   { type: 'text', x, y, text, fontSize, color }
+    let shapes = [];
+
+    // History (undo/redo) – shapes only
+    let history = [];
+    let historyIndex = -1;
+
+    function cloneShapes(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    function pushHistory() {
+        const snapshot = JSON.stringify(shapes);
+        if (historyIndex < history.length - 1) {
+            history.splice(historyIndex + 1);
+        }
+        history.push(snapshot);
+        historyIndex = history.length - 1;
+        updateHistoryButtons();
+    }
+
+    function restoreHistory(index) {
+        shapes = JSON.parse(history[index] || "[]");
+        selectedShape = null;
+        historyIndex = index;
+        updateHistoryButtons();
+        updateControlVisibility();
+        render();
+    }
+
+    function updateHistoryButtons() {
+        undoButton.disabled = historyIndex <= 0;
+        redoButton.disabled = historyIndex >= history.length - 1;
+    }
+
+    // Tools and interaction state
+    let currentTool = "pen";
+    let isDrawing = false;
+    let isPanning = false;         // used for hand tool AND middle mouse
+    let isDraggingSelection = false;
+
+    let currentStroke = null;
+
+    let selectedShape = null;
+    let dragStartWorld = null;
+    let originalShapeData = null;
+
+    let panStartScreen = null;
+    let panStartCamera = null;
+
+    let eraseChanged = false;
+    let moveChanged = false;
+
+    // Pen / text settings
+    let penColor = "#000000";
+    let penWidth = 2;
+    let textSize = 20;
+    const ERASER_RADIUS = 10;   // screen px
+    const HIT_TEST_RADIUS = 8;  // screen px
+
+    // Text editing overlay state
+    let currentTextEditor = null; // { input, shape, originalText }
+
+    // Local saves
+    let saves = loadSavesFromStorage();
+    refreshSavesDropdown();
+
+    // Resize canvas
+    function resizeCanvas() {
+        const toolbarHeight = document.querySelector(".toolbar").offsetHeight;
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight - toolbarHeight;
+        render();
+    }
+    window.addEventListener("resize", () => {
+        resizeCanvas();
+        if (currentTextEditor) {
+            positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+        }
+    });
+    resizeCanvas();
+
+    // UI: visibility helpers
+    function updatePenSizeVisibility() {
+        const hasSelectedStroke = selectedShape && selectedShape.type === "stroke";
+        penSizeContainer.style.display =
+            currentTool === "pen" || hasSelectedStroke ? "inline-flex" : "none";
+    }
+
+    function updateTextSizeVisibility() {
+        const hasSelectedText = selectedShape && selectedShape.type === "text";
+        textSizeContainer.style.display =
+            currentTool === "text" || hasSelectedText ? "inline-flex" : "none";
+    }
+
+    function updateColorVisibility() {
+        const isPenOrText = currentTool === "pen" || currentTool === "text";
+        const hasSelection = !!selectedShape;
+        colorContainer.style.display =
+            isPenOrText || hasSelection ? "inline-flex" : "none";
+    }
+
+    function updateControlVisibility() {
+        updatePenSizeVisibility();
+        updateTextSizeVisibility();
+        updateColorVisibility();
+    }
+
+    // Tool switching
+    toolbarButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+            currentTool = btn.dataset.tool;
+            toolbarButtons.forEach(b => b.classList.toggle("active", b === btn));
+
+            if (currentTool === "hand") {
+                canvas.style.cursor = "grab";
+            } else if (currentTool === "select") {
+                canvas.style.cursor = "default";
+            } else {
+                canvas.style.cursor = "crosshair";
+            }
+
+            updateControlVisibility();
+        });
+    });
+
+    // Pen / text UI handlers — also update selected shape if present
+    penColorInput.addEventListener("input", () => {
+        penColor = penColorInput.value || "#000000";
+
+        if (selectedShape) {
+            selectedShape.color = penColor;
+            render();
+        }
+    });
+
+    penColorInput.addEventListener("change", () => {
+        if (selectedShape) {
+            pushHistory();
+        }
+    });
+
+    penSizeInput.addEventListener("input", () => {
+        const value = parseInt(penSizeInput.value, 10);
+        penWidth = Number.isFinite(value) ? value : penWidth;
+
+        if (selectedShape && selectedShape.type === "stroke") {
+            selectedShape.width = penWidth;
+            render();
+        }
+    });
+
+    penSizeInput.addEventListener("change", () => {
+        if (selectedShape && selectedShape.type === "stroke") {
+            pushHistory();
+        }
+    });
+
+    textSizeInput.addEventListener("input", () => {
+        const value = parseInt(textSizeInput.value, 10);
+        textSize = Number.isFinite(value) ? value : textSize;
+
+        if (selectedShape && selectedShape.type === "text") {
+            selectedShape.fontSize = textSize;
+            render();
+        }
+    });
+
+    textSizeInput.addEventListener("change", () => {
+        if (selectedShape && selectedShape.type === "text") {
+            pushHistory();
+        }
+    });
+
+    // Initialize controls
+    penColorInput.value = penColor;
+    penSizeInput.value = penWidth.toString();
+    textSizeInput.value = textSize.toString();
+    updateControlVisibility();
+
+    // Clear, undo, redo
+    clearButton.addEventListener("click", () => {
+        shapes = [];
+        selectedShape = null;
+        destroyTextEditor();
+        pushHistory();
+        updateControlVisibility();
+        render();
+    });
+
+    undoButton.addEventListener("click", () => {
+        if (historyIndex > 0) {
+            destroyTextEditor();
+            restoreHistory(historyIndex - 1);
+        }
+    });
+
+    redoButton.addEventListener("click", () => {
+        if (historyIndex < history.length - 1) {
+            destroyTextEditor();
+            restoreHistory(historyIndex + 1);
+        }
+    });
+
+    // Keyboard shortcuts
+    window.addEventListener("keydown", (e) => {
+        if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "z") {
+            e.preventDefault();
+            undoButton.click();
+        } else if ((e.ctrlKey && e.key.toLowerCase() === "y") ||
+            (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "z")) {
+            e.preventDefault();
+            redoButton.click();
+        }
+    });
+
+    // Export PNG
+    exportPngButton.addEventListener("click", () => {
+        destroyTextEditor();
+        const dataUrl = canvas.toDataURL("image/png");
+        const link = document.createElement("a");
+        link.href = dataUrl;
+        link.download = "drawing.png";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    });
+
+    // Export JSON
+    exportJsonButton.addEventListener("click", () => {
+        const data = JSON.stringify({ shapes, camera }, null, 2);
+        const blob = new Blob([data], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "drawing.json";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    });
+
+    // LocalStorage helpers
+    function loadSavesFromStorage() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return {};
+            const parsed = JSON.parse(raw);
+            if (typeof parsed !== "object" || parsed === null) return {};
+            return parsed;
+        } catch {
+            return {};
+        }
+    }
+
+    function persistSaves() {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(saves));
+        } catch {
+            // ignore
+        }
+    }
+
+    function refreshSavesDropdown() {
+        loadLocalSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Load saved drawing…";
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        loadLocalSelect.appendChild(placeholder);
+
+        const names = Object.keys(saves).sort((a, b) => a.localeCompare(b));
+        for (const name of names) {
+            const opt = document.createElement("option");
+            opt.value = name;
+            const label = saves[name]?.updatedAt
+                ? `${name} (${new Date(saves[name].updatedAt).toLocaleString()})`
+                : name;
+            opt.textContent = label;
+            loadLocalSelect.appendChild(opt);
+        }
+        loadLocalSelect.disabled = names.length === 0;
+    }
+
+    saveLocalButton.addEventListener("click", () => {
+        destroyTextEditor();
+        const defaultName = "Drawing " + new Date().toLocaleString();
+        const name = prompt("Save name:", defaultName);
+        if (!name) return;
+
+        if (saves[name]) {
+            const overwrite = confirm(`A save named "${name}" already exists. Overwrite?`);
+            if (!overwrite) return;
+        }
+
+        saves[name] = {
+            shapes: cloneShapes(shapes),
+            camera: { ...camera },
+            updatedAt: new Date().toISOString(),
+        };
+        persistSaves();
+        refreshSavesDropdown();
+    });
+
+    loadLocalSelect.addEventListener("change", () => {
+        const name = loadLocalSelect.value;
+        if (!name || !saves[name]) return;
+
+        destroyTextEditor();
+        const save = saves[name];
+        shapes = cloneShapes(save.shapes || []);
+        camera = save.camera ? { ...save.camera } : { x: 0, y: 0, scale: 1 };
+        if (camera.scale == null) camera.scale = 1;
+        selectedShape = null;
+
+        history = [];
+        historyIndex = -1;
+        pushHistory();
+        updateControlVisibility();
+        render();
+    });
+
+    // Coordinate helpers
+    function getCanvasRect() {
+        return canvas.getBoundingClientRect();
+    }
+
+    function screenToWorld(clientX, clientY) {
+        const rect = getCanvasRect();
+        const scale = camera.scale || 1;
+        const sx = clientX - rect.left;
+        const sy = clientY - rect.top;
+        const x = camera.x + sx / scale;
+        const y = camera.y + sy / scale;
+        return { x, y };
+    }
+
+    function worldToScreen(x, y) {
+        const rect = getCanvasRect();
+        const scale = camera.scale || 1;
+        const sx = (x - camera.x) * scale + rect.left;
+        const sy = (y - camera.y) * scale + rect.top;
+        return { x: sx, y: sy };
+    }
+
+    // Distance from point to segment
+    function distPointToSegment(px, py, x1, y1, x2, y2) {
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        if (dx === 0 && dy === 0) {
+            const ddx = px - x1;
+            const ddy = py - y1;
+            return Math.sqrt(ddx * ddx + ddy * ddy);
+        }
+        const t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+        const tt = Math.max(0, Math.min(1, t));
+        const projX = x1 + tt * dx;
+        const projY = y1 + tt * dy;
+        const ddx = px - projX;
+        const ddy = py - projY;
+        return Math.sqrt(ddx * ddx + ddy * ddy);
+    }
+
+    // Hit-testing strokes and text
+    function hitTestStroke(stroke, x, y, radiusWorld) {
+        const pts = stroke.points;
+        for (let i = 0; i < pts.length - 1; i++) {
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            if (distPointToSegment(x, y, p1.x, p1.y, p2.x, p2.y) <= radiusWorld) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function hitTestText(shape, x, y, radiusWorld) {
+        ctx.save();
+        ctx.font = `${shape.fontSize}px sans-serif`;
+        const width = ctx.measureText(shape.text).width;
+        ctx.restore();
+        const height = shape.fontSize;
+        const left = shape.x;
+        const top = shape.y - height;
+        const right = shape.x + width;
+        const bottom = shape.y;
+
+        if (x >= left - radiusWorld && x <= right + radiusWorld &&
+            y >= top - radiusWorld && y <= bottom + radiusWorld) {
+            return true;
+        }
+        return false;
+    }
+
+    function hitTestShapes(x, y, radiusWorld) {
+        const radius = radiusWorld != null
+            ? radiusWorld
+            : (HIT_TEST_RADIUS / (camera.scale || 1));
+
+        for (let i = shapes.length - 1; i >= 0; i--) {
+            const s = shapes[i];
+            if (s.type === "stroke") {
+                if (hitTestStroke(s, x, y, radius)) return s;
+            } else if (s.type === "text") {
+                if (hitTestText(s, x, y, radius)) return s;
+            }
+        }
+        return null;
+    }
+
+    // Erasing
+    function eraseAt(x, y) {
+        const scale = camera.scale || 1;
+        const radiusWorld = ERASER_RADIUS / scale;
+
+        for (let i = shapes.length - 1; i >= 0; i--) {
+            const s = shapes[i];
+            let hit = false;
+            if (s.type === "stroke" && hitTestStroke(s, x, y, radiusWorld)) {
+                hit = true;
+            } else if (s.type === "text" && hitTestText(s, x, y, radiusWorld)) {
+                hit = true;
+            }
+            if (hit) {
+                shapes.splice(i, 1);
+                if (selectedShape === s) selectedShape = null;
+                eraseChanged = true;
+                break;
+            }
+        }
+    }
+
+    // Rendering
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const scale = camera.scale || 1;
+
+        for (const s of shapes) {
+            if (s.type === "stroke") {
+                drawStroke(s, scale);
+            } else if (s.type === "text") {
+                drawTextShape(s, scale);
+            }
+        }
+
+        if (selectedShape) {
+            drawSelectionOutline(selectedShape, scale);
+        }
+    }
+
+    function drawStroke(stroke, scale) {
+        if (stroke.points.length < 2) return;
+        ctx.save();
+        ctx.beginPath();
+        const pts = stroke.points;
+        for (let i = 0; i < pts.length; i++) {
+            const sx = (pts[i].x - camera.x) * scale;
+            const sy = (pts[i].y - camera.y) * scale;
+            if (i === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+        }
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = stroke.width * scale;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawTextShape(shape, scale) {
+        ctx.save();
+        const fontSizeScreen = shape.fontSize * scale;
+        ctx.font = `${fontSizeScreen}px sans-serif`;
+        ctx.fillStyle = shape.color;
+        const sx = (shape.x - camera.x) * scale;
+        const sy = (shape.y - camera.y) * scale;
+        ctx.fillText(shape.text, sx, sy);
+        ctx.restore();
+    }
+
+    function drawSelectionOutline(shape, scale) {
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#007bff";
+
+        if (shape.type === "stroke") {
+            const pts = shape.points;
+            if (pts.length === 0) {
+                ctx.restore();
+                return;
+            }
+            let minX = pts[0].x, maxX = pts[0].x;
+            let minY = pts[0].y, maxY = pts[0].y;
+            for (const p of pts) {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            }
+            const pad = 4;
+            const sx = (minX - pad - camera.x) * scale;
+            const sy = (minY - pad - camera.y) * scale;
+            const w = (maxX - minX + pad * 2) * scale;
+            const h = (maxY - minY + pad * 2) * scale;
+            ctx.strokeRect(sx, sy, w, h);
+        } else if (shape.type === "text") {
+            const fontSizeScreen = shape.fontSize * scale;
+            ctx.font = `${fontSizeScreen}px sans-serif`;
+            const width = ctx.measureText(shape.text).width;
+            const height = fontSizeScreen;
+            const pad = 4;
+            const sx = (shape.x - camera.x) * scale - pad;
+            const sy = (shape.y - camera.y) * scale - height - pad;
+            const w = width + pad * 2;
+            const h = height + pad * 2;
+            ctx.strokeRect(sx, sy, w, h);
+        }
+
+        ctx.restore();
+    }
+
+    // Text editor overlay helpers
+    function destroyTextEditor() {
+        if (currentTextEditor && currentTextEditor.input) {
+            currentTextEditor.input.remove();
+        }
+        currentTextEditor = null;
+    }
+
+    function positionTextEditor(shape, input) {
+        const scale = camera.scale || 1;
+        const rect = getCanvasRect();
+        const fontSizeScreen = shape.fontSize * scale;
+
+        ctx.save();
+        ctx.font = `${fontSizeScreen}px sans-serif`;
+        const textWidth = ctx.measureText(shape.text || "").width;
+        ctx.restore();
+
+        const sx = (shape.x - camera.x) * scale + rect.left;
+        const sy = (shape.y - camera.y) * scale + rect.top - fontSizeScreen;
+
+        const width = Math.max(50, textWidth + 16); // minimal width with padding
+        const height = fontSizeScreen + 8;
+
+        input.style.left = `${sx}px`;
+        input.style.top = `${sy}px`;
+        input.style.width = `${width}px`;
+        input.style.height = `${height}px`;
+        input.style.fontSize = `${fontSizeScreen}px`;
+        input.style.color = shape.color || "#000000";
+    }
+
+    function showTextEditor(shape) {
+        destroyTextEditor();
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "text-editor-overlay";
+        input.value = shape.text || "";
+        document.body.appendChild(input);
+
+        positionTextEditor(shape, input);
+
+        currentTextEditor = { input, shape, originalText: shape.text };
+
+        input.focus();
+        input.select();
+
+        const commit = () => {
+            const newVal = input.value.trim();
+            if (newVal === "") {
+                // delete shape
+                const idx = shapes.indexOf(shape);
+                if (idx !== -1) shapes.splice(idx, 1);
+                if (selectedShape === shape) selectedShape = null;
+            } else {
+                shape.text = newVal;
+            }
+            destroyTextEditor();
+            pushHistory();
+            updateControlVisibility();
+            render();
+        };
+
+        const cancel = () => {
+            shape.text = currentTextEditor.originalText;
+            destroyTextEditor();
+            render();
+        };
+
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                commit();
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancel();
+            }
+        });
+
+        input.addEventListener("blur", () => {
+            // If it already got destroyed via commit/cancel, skip
+            if (!currentTextEditor || currentTextEditor.input !== input) return;
+            commit();
+        });
+    }
+
+    // Mouse handling
+    canvas.addEventListener("mousedown", (e) => {
+        destroyTextEditor();
+
+        // Middle mouse: always pan
+        if (e.button === 1) {
+            e.preventDefault();
+            isPanning = true;
+            panStartScreen = { x: e.clientX, y: e.clientY };
+            panStartCamera = { x: camera.x, y: camera.y };
+            canvas.style.cursor = "grabbing";
+            return;
+        }
+
+        // Only handle left button for drawing/selecting
+        if (e.button !== 0) return;
+
+        const world = screenToWorld(e.clientX, e.clientY);
+
+        if (currentTool === "pen") {
+            isDrawing = true;
+            currentStroke = {
+                type: "stroke",
+                points: [world],
+                color: penColor,
+                width: penWidth,
+            };
+            shapes.push(currentStroke);
+            selectedShape = null;
+            updateControlVisibility();
+            render();
+        } else if (currentTool === "eraser") {
+            isDrawing = true;
+            eraseChanged = false;
+            eraseAt(world.x, world.y);
+            render();
+        } else if (currentTool === "select") {
+            const hit = hitTestShapes(world.x, world.y);
+            selectedShape = hit;
+            if (hit) {
+                isDraggingSelection = true;
+                dragStartWorld = { ...world };
+                moveChanged = false;
+                if (hit.type === "stroke") {
+                    originalShapeData = hit.points.map(p => ({ x: p.x, y: p.y }));
+                } else if (hit.type === "text") {
+                    originalShapeData = { x: hit.x, y: hit.y };
+                }
+            } else {
+                isDraggingSelection = false;
+                originalShapeData = null;
+            }
+            updateControlVisibility();
+            render();
+        } else if (currentTool === "text") {
+            const text = prompt("Enter text:");
+            if (text && text.trim() !== "") {
+                const shape = {
+                    type: "text",
+                    x: world.x,
+                    y: world.y,
+                    text: text.trim(),
+                    fontSize: textSize,
+                    color: penColor,
+                };
+                shapes.push(shape);
+                selectedShape = shape;
+                pushHistory();
+                updateControlVisibility();
+                render();
+            }
+        } else if (currentTool === "hand") {
+            isPanning = true;
+            panStartScreen = { x: e.clientX, y: e.clientY };
+            panStartCamera = { x: camera.x, y: camera.y };
+            canvas.style.cursor = "grabbing";
+        }
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+        const world = screenToWorld(e.clientX, e.clientY);
+
+        if (currentTool === "pen" && isDrawing && currentStroke) {
+            currentStroke.points.push(world);
+            render();
+        } else if (currentTool === "eraser" && isDrawing) {
+            eraseAt(world.x, world.y);
+            render();
+        } else if (currentTool === "select" && isDraggingSelection && selectedShape) {
+            const dx = world.x - dragStartWorld.x;
+            const dy = world.y - dragStartWorld.y;
+
+            if (selectedShape.type === "stroke") {
+                for (let i = 0; i < selectedShape.points.length; i++) {
+                    const orig = originalShapeData[i];
+                    selectedShape.points[i].x = orig.x + dx;
+                    selectedShape.points[i].y = orig.y + dy;
+                }
+            } else if (selectedShape.type === "text") {
+                selectedShape.x = originalShapeData.x + dx;
+                selectedShape.y = originalShapeData.y + dy;
+            }
+            moveChanged = true;
+            render();
+        } else if (isPanning) {
+            const scale = camera.scale || 1;
+            const dx = e.clientX - panStartScreen.x;
+            const dy = e.clientY - panStartScreen.y;
+            camera.x = panStartCamera.x - dx / scale;
+            camera.y = panStartCamera.y - dy / scale;
+            render();
+        }
+    });
+
+    canvas.addEventListener("mouseup", stopAllInteractions);
+    canvas.addEventListener("mouseleave", stopAllInteractions);
+
+    function stopAllInteractions() {
+        if (currentTool === "pen" && isDrawing && currentStroke) {
+            if (currentStroke.points.length > 1) {
+                pushHistory();
+            } else {
+                shapes.pop();
+            }
+        }
+        if (currentTool === "eraser" && isDrawing && eraseChanged) {
+            pushHistory();
+        }
+        if (currentTool === "select" && isDraggingSelection && moveChanged) {
+            pushHistory();
+        }
+
+        isDrawing = false;
+        isPanning = false;
+        isDraggingSelection = false;
+        currentStroke = null;
+        dragStartWorld = null;
+        originalShapeData = null;
+        eraseChanged = false;
+        moveChanged = false;
+
+        if (currentTool === "hand") {
+            canvas.style.cursor = "grab";
+        } else if (currentTool === "select") {
+            canvas.style.cursor = "default";
+        } else {
+            canvas.style.cursor = "crosshair";
+        }
+    }
+
+    // Scroll wheel zoom
+    canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+
+        const rect = getCanvasRect();
+        const scale = camera.scale || 1;
+        const sx = e.clientX - rect.left;
+        const sy = e.clientY - rect.top;
+
+        const worldX = camera.x + sx / scale;
+        const worldY = camera.y + sy / scale;
+
+        const zoomFactor = 1.1;
+        const delta = e.deltaY < 0 ? 1 : -1;
+        let newScale = delta > 0 ? scale * zoomFactor : scale / zoomFactor;
+
+        const MIN_SCALE = 0.2;
+        const MAX_SCALE = 5;
+        newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+        camera.scale = newScale;
+
+        camera.x = worldX - sx / newScale;
+        camera.y = worldY - sy / newScale;
+
+        render();
+        if (currentTextEditor) {
+            positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+        }
+    }, { passive: false });
+
+    // Double-click to edit text
+    canvas.addEventListener("dblclick", (e) => {
+        const world = screenToWorld(e.clientX, e.clientY);
+        const shape = hitTestShapes(world.x, world.y);
+        if (!shape || shape.type !== "text") return;
+
+        selectedShape = shape;
+        updateControlVisibility();
+        render();
+        showTextEditor(shape);
+    });
+
+    // Initial history snapshot
+    pushHistory();
+    render();
+</script>
+</body>
+</html>
