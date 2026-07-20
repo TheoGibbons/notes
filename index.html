@@ -32,6 +32,7 @@
         }
         .toolbar button,
         .toolbar select,
+        .toolbar input[type="text"],
         .toolbar input[type="color"],
         .toolbar input[type="range"] {
             border: 1px solid #ccc;
@@ -49,6 +50,10 @@
         .toolbar input[type="range"] {
             cursor: pointer;
         }
+        .toolbar input[type="text"] {
+            cursor: text;
+            width: 150px;
+        }
         .toolbar button.active {
             background: #007bff;
             color: #fff;
@@ -58,6 +63,13 @@
             background: #f5f5f5;
             color: #888;
             cursor: default;
+        }
+        #load-local.save-success {
+            outline: 2px solid #28a745;
+            outline-offset: 1px;
+        }
+        #load-local option.autosave-option {
+            color: #006dcc;
         }
         .toolbar .group-label {
             font-weight: 600;
@@ -120,7 +132,7 @@
 
     <div class="divider"></div>
 
-    <button id="insert-image">Image</button>
+    <button id="insert-image" title="Insert an image file or paste one with Ctrl+V">Image</button>
     <input type="file" id="image-file-input" accept="image/*" style="display:none" />
 
     <div class="divider"></div>
@@ -161,8 +173,9 @@
     <div class="divider"></div>
 
     <span class="group-label">Local saves:</span>
+    <input type="text" id="save-name" value="Drawing 1" aria-label="Save name" />
     <button id="save-local">Save</button>
-    <select id="load-local" title="Load saved drawing"></select>
+    <select id="load-local" title="Previous saves"></select>
 
     <div class="spacer"></div>
 
@@ -185,6 +198,7 @@
     const exportPngButton = document.getElementById("export-png");
     const exportJsonButton = document.getElementById("export-json");
     const saveLocalButton = document.getElementById("save-local");
+    const saveNameInput = document.getElementById("save-name");
     const loadLocalSelect = document.getElementById("load-local");
 
     const insertImageButton = document.getElementById("insert-image");
@@ -210,6 +224,8 @@
     // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth }
     // image:  { type: 'image', x, y, width, height, rotation, src }
     let shapes = [];
+    let cleanShapesSnapshot = JSON.stringify(shapes);
+    let isDirty = false;
 
     // History (undo/redo) – shapes only
     let history = [];
@@ -226,13 +242,24 @@
         }
         history.push(snapshot);
         historyIndex = history.length - 1;
+        updateDirtyState();
         updateHistoryButtons();
+    }
+
+    function updateDirtyState() {
+        isDirty = JSON.stringify(shapes) !== cleanShapesSnapshot;
+    }
+
+    function markCurrentDrawingClean() {
+        cleanShapesSnapshot = JSON.stringify(shapes);
+        updateDirtyState();
     }
 
     function restoreHistory(index) {
         shapes = JSON.parse(history[index] || "[]");
         selectedShape = null;
         historyIndex = index;
+        updateDirtyState();
         updateHistoryButtons();
         updateControlVisibility();
         render();
@@ -255,6 +282,8 @@
     let panStartCamera = { x: 0, y: 0 };
 
     let currentStroke = null;
+    let draftShape = null;
+    let drawingStartWorld = null;
 
     let selectedShape = null;
     let dragStartWorld = null;
@@ -462,7 +491,8 @@
     }
 
     function drawArrowShape(shape, scale) {
-        const len = shape.length || 100;
+        const len = shape.length ?? 0;
+        if (len <= 0) return;
         const strokeWidth = shape.strokeWidth || 2;
         const headLength = Math.max(10, strokeWidth * 4);
         const half = len / 2;
@@ -488,8 +518,13 @@
 
     function drawImageShape(shape, scale) {
         const { x, y, width, height, rotation, src } = shape;
-        const img = imageCache.get(src)?.img;
-        if (!img) return;
+        const cached = imageCache.get(src);
+        if (!cached) {
+            loadImageSource(src, render);
+            return;
+        }
+        if (!cached.loaded || !cached.img) return;
+        const img = cached.img;
 
         ctx.save();
         ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
@@ -597,6 +632,7 @@
 
     // Local saves
     let saves = loadSavesFromStorage();
+    let saveSuccessTimeout = null;
     refreshSavesDropdown();
 
     // Resize canvas
@@ -626,10 +662,11 @@
     }
 
     function updateColorVisibility() {
-        const isPenOrText = currentTool === "pen" || currentTool === "text";
-        const hasSelection = !!selectedShape;
+        const isColorDrawingTool = currentTool === "pen" || currentTool === "text" ||
+            currentTool === "rect" || currentTool === "circle" || currentTool === "arrow";
+        const hasColorableSelection = !!getShapeColorProperty(selectedShape);
         colorContainer.style.display =
-            isPenOrText || hasSelection ? "inline-flex" : "none";
+            isColorDrawingTool || hasColorableSelection ? "inline-flex" : "none";
     }
 
     function updateControlVisibility() {
@@ -661,17 +698,27 @@
     });
 
     // Pen / text UI handlers — also update selected shape if present
+    function getShapeColorProperty(shape) {
+        if (!shape) return null;
+        if (shape.type === "stroke" || shape.type === "text") return "color";
+        if (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow") {
+            return "strokeColor";
+        }
+        return null;
+    }
+
     penColorInput.addEventListener("input", () => {
         penColor = penColorInput.value || "#000000";
 
-        if (selectedShape) {
-            selectedShape.color = penColor;
+        const colorProperty = getShapeColorProperty(selectedShape);
+        if (colorProperty) {
+            selectedShape[colorProperty] = penColor;
             render();
         }
     });
 
     penColorInput.addEventListener("change", () => {
-        if (selectedShape) {
+        if (getShapeColorProperty(selectedShape)) {
             pushHistory();
         }
     });
@@ -740,7 +787,25 @@
 
     // Keyboard shortcuts
     window.addEventListener("keydown", (e) => {
-        if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "z") {
+        const targetIsEditable = e.target instanceof HTMLInputElement ||
+            e.target instanceof HTMLTextAreaElement || e.target?.isContentEditable;
+
+        if (e.key === "Escape") {
+            e.preventDefault();
+            stopAllInteractions(true);
+            switchToSelectTool();
+            render();
+        } else if (e.key === "Delete" && selectedShape && !targetIsEditable) {
+            e.preventDefault();
+            const selectedIndex = shapes.indexOf(selectedShape);
+            if (selectedIndex !== -1) {
+                shapes.splice(selectedIndex, 1);
+                selectedShape = null;
+                pushHistory();
+                updateControlVisibility();
+                render();
+            }
+        } else if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "z") {
             e.preventDefault();
             undoButton.click();
         } else if ((e.ctrlKey && e.key.toLowerCase() === "y") ||
@@ -792,11 +857,12 @@
         }
     }
 
-    function persistSaves() {
+    function persistSaves(value = saves) {
         try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(saves));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+            return true;
         } catch {
-            // ignore
+            return false;
         }
     }
 
@@ -804,7 +870,7 @@
         loadLocalSelect.innerHTML = "";
         const placeholder = document.createElement("option");
         placeholder.value = "";
-        placeholder.textContent = "Load saved drawing…";
+        placeholder.textContent = "Previous saves…";
         placeholder.disabled = true;
         placeholder.selected = true;
         loadLocalSelect.appendChild(placeholder);
@@ -813,6 +879,7 @@
         for (const name of names) {
             const opt = document.createElement("option");
             opt.value = name;
+            if (isAutosaveName(name)) opt.classList.add("autosave-option");
             opt.textContent = saves[name]?.updatedAt
                 ? `${name} (${new Date(saves[name].updatedAt).toLocaleString()})`
                 : name;
@@ -821,33 +888,111 @@
         loadLocalSelect.disabled = names.length === 0;
     }
 
-    saveLocalButton.addEventListener("click", () => {
-        destroyTextEditor();
-        const defaultName = "Drawing " + new Date().toLocaleString();
-        const name = prompt("Save name:", defaultName);
-        if (!name) return;
+    function isAutosaveName(name) {
+        return /^autosave/i.test(name);
+    }
 
-        if (saves[name]) {
-            const overwrite = confirm(`A save named "${name}" already exists. Overwrite?`);
-            if (!overwrite) return;
+    function pruneAutosaves(saveCollection) {
+        const autosaveNames = Object.keys(saveCollection)
+            .filter(isAutosaveName)
+            .sort((a, b) => {
+                const aTime = new Date(saveCollection[a]?.updatedAt || 0).getTime();
+                const bTime = new Date(saveCollection[b]?.updatedAt || 0).getTime();
+                return bTime - aTime;
+            });
+
+        autosaveNames.slice(10).forEach(name => delete saveCollection[name]);
+    }
+
+    function flashSaveSuccess() {
+        loadLocalSelect.classList.add("save-success");
+        if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
+        saveSuccessTimeout = setTimeout(() => {
+            loadLocalSelect.classList.remove("save-success");
+            saveSuccessTimeout = null;
+        }, 1500);
+    }
+
+    function storeDrawing(name, { showSuccess = false, showError = false } = {}) {
+        const nextSaves = {
+            ...saves,
+            [name]: {
+                shapes: cloneShapes(shapes),
+                camera: { ...camera },
+                updatedAt: new Date().toISOString(),
+            },
+        };
+        pruneAutosaves(nextSaves);
+
+        if (!persistSaves(nextSaves)) {
+            if (showError) {
+                alert("The drawing could not be saved. Your changes are still unsaved.");
+            }
+            return false;
         }
 
-        saves[name] = {
-            shapes: cloneShapes(shapes),
-            camera: { ...camera },
-            updatedAt: new Date().toISOString(),
-        };
-        persistSaves();
+        saves = nextSaves;
         refreshSavesDropdown();
+        markCurrentDrawingClean();
+        if (showSuccess) flashSaveSuccess();
+        return true;
+    }
+
+    function autosaveIfDirty(showError = false) {
+        if (currentTextEditor) {
+            currentTextEditor.shape.text = currentTextEditor.input.value || "";
+        }
+        updateDirtyState();
+        if (!isDirty) return true;
+        const autosaveName = `Autosave (${new Date().toLocaleString()})`;
+        return storeDrawing(autosaveName, { showError });
+    }
+
+    function saveNamedDrawing() {
+        destroyTextEditor();
+        const name = saveNameInput.value.trim();
+        if (!name) {
+            saveNameInput.focus();
+            return;
+        }
+        if (isAutosaveName(name)) {
+            saveNameInput.setCustomValidity('Save names cannot begin with "Autosave".');
+            saveNameInput.reportValidity();
+            saveNameInput.focus();
+            return;
+        }
+        saveNameInput.setCustomValidity("");
+        storeDrawing(name, { showSuccess: true, showError: true });
+    }
+
+    saveLocalButton.addEventListener("click", saveNamedDrawing);
+
+    saveNameInput.addEventListener("input", () => {
+        saveNameInput.setCustomValidity("");
+    });
+
+    saveNameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            saveNamedDrawing();
+        }
     });
 
     loadLocalSelect.addEventListener("change", () => {
         const name = loadLocalSelect.value;
         if (!name || !saves[name]) return;
 
+        if (!autosaveIfDirty(true)) {
+            loadLocalSelect.value = "";
+            return;
+        }
+
         destroyTextEditor();
         const save = saves[name];
+        saveNameInput.value = name;
+        saveNameInput.setCustomValidity("");
         shapes = cloneShapes(save.shapes || []);
+        markCurrentDrawingClean();
         camera = save.camera ? { ...save.camera } : { x: 0, y: 0, scale: 1 };
         if (camera.scale == null) camera.scale = 1;
         selectedShape = null;
@@ -858,6 +1003,9 @@
         updateControlVisibility();
         render();
     });
+
+    setInterval(() => autosaveIfDirty(false), 30000);
+    window.addEventListener("beforeunload", () => autosaveIfDirty(false));
 
     // Coordinate helpers
     function getCanvasRect() {
@@ -1137,6 +1285,84 @@
         shapeStartRotation = shape.rotation || 0;
     }
 
+    function isShapeDrawingTool(tool) {
+        return tool === "rect" || tool === "circle" || tool === "arrow";
+    }
+
+    function switchToSelectTool() {
+        currentTool = "select";
+        toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
+        canvas.style.cursor = "default";
+        updateControlVisibility();
+    }
+
+    function beginShapeDrawing(tool, world) {
+        isDrawing = true;
+        drawingStartWorld = { ...world };
+
+        if (tool === "rect") {
+            draftShape = {
+                type: "rect",
+                x: world.x,
+                y: world.y,
+                width: 0,
+                height: 0,
+                rotation: 0,
+                strokeColor: penColor,
+                fillColor: null,
+                strokeWidth: penWidth,
+            };
+        } else if (tool === "circle") {
+            draftShape = {
+                type: "circle",
+                x: world.x,
+                y: world.y,
+                rx: 0,
+                ry: 0,
+                rotation: 0,
+                strokeColor: penColor,
+                fillColor: null,
+                strokeWidth: penWidth,
+            };
+        } else {
+            draftShape = {
+                type: "arrow",
+                x: world.x,
+                y: world.y,
+                length: 0,
+                rotation: 0,
+                strokeColor: penColor,
+                strokeWidth: penWidth,
+            };
+        }
+
+        shapes.push(draftShape);
+        selectedShape = null;
+        updateControlVisibility();
+        render();
+    }
+
+    function updateDraftShape(world) {
+        if (!draftShape || !drawingStartWorld) return;
+
+        const start = drawingStartWorld;
+        const dx = world.x - start.x;
+        const dy = world.y - start.y;
+        draftShape.x = start.x + dx / 2;
+        draftShape.y = start.y + dy / 2;
+
+        if (draftShape.type === "rect") {
+            draftShape.width = Math.abs(dx);
+            draftShape.height = Math.abs(dy);
+        } else if (draftShape.type === "circle") {
+            draftShape.rx = Math.abs(dx) / 2;
+            draftShape.ry = Math.abs(dy) / 2;
+        } else if (draftShape.type === "arrow") {
+            draftShape.length = Math.hypot(dx, dy);
+            draftShape.rotation = Math.atan2(dy, dx);
+        }
+    }
+
     function handlePrimaryDownAtWorld(world, screenX, screenY) {
         if (currentTool === "pen") {
             isDrawing = true;
@@ -1207,73 +1433,19 @@
                 updateControlVisibility();
                 render();
             }
-        } else if (currentTool === "rect") {
-            const size = 100 / (camera.scale || 1);
-            const shape = {
-                type: "rect",
-                x: world.x,
-                y: world.y,
-                width: size * 1.4,
-                height: size,
-                rotation: 0,
-                strokeColor: penColor,
-                fillColor: null,
-                strokeWidth: penWidth,
-            };
-            shapes.push(shape);
-            selectedShape = shape;
-            pushHistory();
-            // immediately switch to select tool so user can move/resize/rotate
-            currentTool = "select";
-            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
-            updateControlVisibility();
-            render();
-        } else if (currentTool === "circle") {
-            const r = 50 / (camera.scale || 1);
-            const shape = {
-                type: "circle",
-                x: world.x,
-                y: world.y,
-                rx: r,
-                ry: r,
-                rotation: 0,
-                strokeColor: penColor,
-                fillColor: null,
-                strokeWidth: penWidth,
-            };
-            shapes.push(shape);
-            selectedShape = shape;
-            pushHistory();
-            currentTool = "select";
-            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
-            updateControlVisibility();
-            render();
-        } else if (currentTool === "arrow") {
-            const length = 120 / (camera.scale || 1);
-            const shape = {
-                type: "arrow",
-                x: world.x,
-                y: world.y,
-                length,
-                rotation: 0,
-                strokeColor: penColor,
-                strokeWidth: penWidth,
-            };
-            shapes.push(shape);
-            selectedShape = shape;
-            pushHistory();
-            currentTool = "select";
-            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
-            updateControlVisibility();
-            render();
+        } else if (isShapeDrawingTool(currentTool)) {
+            beginShapeDrawing(currentTool, world);
          } else if (currentTool === "hand") {
             beginPan(screenX, screenY);
         }
     }
 
-    function handlePointerMove(world, screenX, screenY) {
+    function handlePointerMove(world, screenX, screenY, keepAspectRatio = false) {
         if (currentTool === "pen" && isDrawing && currentStroke) {
             currentStroke.points.push(world);
+            render();
+        } else if (isShapeDrawingTool(currentTool) && isDrawing && draftShape) {
+            updateDraftShape(world);
             render();
         } else if (currentTool === "eraser" && isDrawing) {
             eraseAt(world.x, world.y);
@@ -1305,6 +1477,20 @@
                 } else if (activeHandle === "bl") {
                     newW = Math.max(minSize, b.width - dxLocal);
                     newH = Math.max(minSize, b.height + dyLocal);
+                }
+
+                if (selectedShape.type === "image" && keepAspectRatio && b.width > 0 && b.height > 0) {
+                    const widthScale = newW / b.width;
+                    const heightScale = newH / b.height;
+                    const uniformScale = Math.max(
+                        minSize / b.width,
+                        minSize / b.height,
+                        Math.abs(widthScale - 1) >= Math.abs(heightScale - 1)
+                            ? widthScale
+                            : heightScale
+                    );
+                    newW = b.width * uniformScale;
+                    newH = b.height * uniformScale;
                 }
 
                 if (selectedShape.type === "circle") {
@@ -1361,12 +1547,30 @@
         }
     }
 
-    function stopAllInteractions() {
+    function stopAllInteractions(cancelDrawing = false) {
+        if (isShapeDrawingTool(currentTool) && isDrawing && draftShape) {
+            const minimumSize = 3 / (camera.scale || 1);
+            const isLargeEnough = draftShape.type === "arrow"
+                ? draftShape.length >= minimumSize
+                : draftShape.type === "circle"
+                    ? draftShape.rx * 2 >= minimumSize && draftShape.ry * 2 >= minimumSize
+                    : draftShape.width >= minimumSize && draftShape.height >= minimumSize;
+
+            if (isLargeEnough && !cancelDrawing) {
+                pushHistory();
+                selectedShape = null;
+            } else {
+                const draftIndex = shapes.indexOf(draftShape);
+                if (draftIndex !== -1) shapes.splice(draftIndex, 1);
+            }
+            render();
+        }
         if (currentTool === "pen" && isDrawing && currentStroke) {
-            if (currentStroke.points.length > 1) {
+            if (currentStroke.points.length > 1 && !cancelDrawing) {
                 pushHistory();
             } else {
-                shapes.pop();
+                const strokeIndex = shapes.indexOf(currentStroke);
+                if (strokeIndex !== -1) shapes.splice(strokeIndex, 1);
             }
         }
         if (currentTool === "eraser" && isDrawing && eraseChanged) {
@@ -1390,6 +1594,8 @@
         isResizing = false;
         isRotating = false;
         currentStroke = null;
+        draftShape = null;
+        drawingStartWorld = null;
         dragStartWorld = null;
         originalShapeData = null;
         originalBounds = null;
@@ -1429,7 +1635,7 @@
 
     canvas.addEventListener("mousemove", (e) => {
         const world = screenToWorld(e.clientX, e.clientY);
-        handlePointerMove(world, e.clientX, e.clientY);
+        handlePointerMove(world, e.clientX, e.clientY, e.shiftKey);
     });
 
     canvas.addEventListener("mouseup", () => stopAllInteractions());
@@ -1579,56 +1785,92 @@
         imageFileInput.click();
     });
 
-    imageFileInput.addEventListener("change", (e) => {
-        const file = e.target.files && e.target.files[0];
-        if (!file) return;
+    function loadImageSource(src, onLoad) {
+        const cached = imageCache.get(src);
+        if (cached) {
+            if (cached.loaded && cached.img) onLoad(cached.img);
+            else if (!cached.error) cached.callbacks.push(onLoad);
+            return;
+        }
 
-        const url = URL.createObjectURL(file);
         const img = new Image();
+        const entry = { img, loaded: false, error: false, callbacks: [onLoad] };
+        imageCache.set(src, entry);
         img.onload = () => {
-            // store in cache
-            imageCache.set(url, { img, loaded: true, error: false });
+            entry.loaded = true;
+            const callbacks = entry.callbacks.splice(0);
+            callbacks.forEach(callback => callback(img));
+        };
+        img.onerror = () => {
+            entry.img = null;
+            entry.error = true;
+            entry.callbacks.length = 0;
+        };
+        img.src = src;
+    }
 
+    function addImageSource(src) {
+        loadImageSource(src, (img) => {
             const baseScale = camera.scale || 1;
             const maxDimension = Math.min(canvas.width, canvas.height) / baseScale * 0.5;
-            const aspect = img.width / img.height;
-            let w, h;
+            const aspect = img.naturalWidth / img.naturalHeight;
+            let width;
+            let height;
             if (aspect >= 1) {
-                w = maxDimension;
-                h = maxDimension / aspect;
+                width = maxDimension;
+                height = maxDimension / aspect;
             } else {
-                h = maxDimension;
-                w = maxDimension * aspect;
+                height = maxDimension;
+                width = maxDimension * aspect;
             }
-
-            const centerWorldX = camera.x + (canvas.width / 2) / (camera.scale || 1);
-            const centerWorldY = camera.y + (canvas.height / 2) / (camera.scale || 1);
 
             const shape = {
                 type: "image",
-                x: centerWorldX,
-                y: centerWorldY,
-                width: w,
-                height: h,
+                x: camera.x + (canvas.width / 2) / baseScale,
+                y: camera.y + (canvas.height / 2) / baseScale,
+                width,
+                height,
                 rotation: 0,
-                src: url,
+                src,
             };
             shapes.push(shape);
             selectedShape = shape;
             pushHistory();
-            currentTool = "select";
-            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
-            updateControlVisibility();
+            switchToSelectTool();
             render();
-        };
-        img.onerror = () => {
-            imageCache.set(url, { img: null, loaded: false, error: true });
-            URL.revokeObjectURL(url);
-        };
-        img.src = url;
-         // clear the input so same file can be chosen again later
-         imageFileInput.value = "";
-     });
+        });
+    }
+
+    function addImageBlob(blob) {
+        if (!blob || !blob.type.startsWith("image/")) return;
+        const reader = new FileReader();
+        reader.onload = () => addImageSource(reader.result);
+        reader.readAsDataURL(blob);
+    }
+
+    imageFileInput.addEventListener("change", (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        addImageBlob(file);
+        // Clear the input so the same file can be chosen again later.
+        imageFileInput.value = "";
+    });
+
+    window.addEventListener("paste", (e) => {
+        const target = e.target;
+        if (target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            target?.isContentEditable) return;
+
+        const items = Array.from(e.clipboardData?.items || []);
+        const imageItem = items.find(item => item.kind === "file" && item.type.startsWith("image/"));
+        const imageFile = imageItem?.getAsFile() ||
+            Array.from(e.clipboardData?.files || []).find(file => file.type.startsWith("image/"));
+        if (!imageFile) return;
+
+        e.preventDefault();
+        addImageBlob(imageFile);
+    });
 
     // Initial history snapshot
     pushHistory();
