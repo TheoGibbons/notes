@@ -114,6 +114,17 @@
 
     <div class="divider"></div>
 
+    <button data-tool="rect">Rect</button>
+    <button data-tool="circle">Circle</button>
+    <button data-tool="arrow">Arrow</button>
+
+    <div class="divider"></div>
+
+    <button id="insert-image">Image</button>
+    <input type="file" id="image-file-input" accept="image/*" style="display:none" />
+
+    <div class="divider"></div>
+
     <button data-tool="eraser">Eraser</button>
     <button data-tool="select">Select / Move</button>
     <button data-tool="hand">Hand / Pan</button>
@@ -121,17 +132,17 @@
     <div class="divider"></div>
 
     <div id="color-container" class="inline-group">
-        <span class="group-label">Color:</span>
+        <label class="group-label" for="pen-color">Color:</label>
         <input type="color" id="pen-color" value="#000000" />
     </div>
 
     <div id="pen-size-container" class="inline-group">
-        <span class="group-label">Pen size:</span>
+        <label class="group-label" for="pen-size">Pen size:</label>
         <input type="range" id="pen-size" min="1" max="20" value="2" />
     </div>
 
     <div id="text-size-container" class="inline-group">
-        <span class="group-label">Text size:</span>
+        <label class="group-label" for="text-size">Text size:</label>
         <input type="range" id="text-size" min="8" max="72" value="20" />
     </div>
 
@@ -161,6 +172,9 @@
 <canvas id="canvas"></canvas>
 
 <script>
+    // Cache loaded images so we don't recreate them every frame
+    const imageCache = new Map(); // src -> { img, loaded, error }
+
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
 
@@ -172,6 +186,9 @@
     const exportJsonButton = document.getElementById("export-json");
     const saveLocalButton = document.getElementById("save-local");
     const loadLocalSelect = document.getElementById("load-local");
+
+    const insertImageButton = document.getElementById("insert-image");
+    const imageFileInput = document.getElementById("image-file-input");
 
     const colorContainer = document.getElementById("color-container");
     const penColorInput = document.getElementById("pen-color");
@@ -188,6 +205,10 @@
     // Shapes
     // stroke: { type: 'stroke', points: [{x,y},...], color, width }
     // text:   { type: 'text', x, y, text, fontSize, color }
+    // rect:   { type: 'rect', x, y, width, height, rotation, strokeColor, fillColor, strokeWidth }
+    // circle: { type: 'circle', x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth }
+    // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth }
+    // image:  { type: 'image', x, y, width, height, rotation, src }
     let shapes = [];
 
     // History (undo/redo) – shapes only
@@ -227,24 +248,32 @@
     let isDrawing = false;
     let isPanning = false;         // used for hand tool, middle mouse, and touch pan
     let isDraggingSelection = false;
-    let isPinching = false;        // touch pinch zoom
+    let isResizing = false;
+    let isRotating = false;
+    let activeHandle = null; // e.g. 'tl','tr','br','bl','t','r','b','l','rot'
+    let panStartScreen = null;
+    let panStartCamera = { x: 0, y: 0 };
 
     let currentStroke = null;
 
     let selectedShape = null;
     let dragStartWorld = null;
     let originalShapeData = null;
-
-    let panStartScreen = null;
-    let panStartCamera = null;
+    let originalBounds = null; // for resize: { x, y, width, height, radius, rotation }
+    let rotationCenter = null;
+    let rotationStartAngle = 0;
+    let shapeStartRotation = 0;
 
     // Pinch state
     let pinchStartDistance = 0;
     let pinchStartScale = 1;
     let pinchCenterWorld = null;
+    let isPinching = false;
 
     let eraseChanged = false;
     let moveChanged = false;
+    let resizeChanged = false;
+    let rotateChanged = false;
 
     // Pen / text settings
     let penColor = "#000000";
@@ -255,6 +284,316 @@
 
     // Text editing overlay state
     let currentTextEditor = null; // { input, shape, originalText }
+
+    function destroyTextEditor() {
+        if (!currentTextEditor) return;
+        const { input } = currentTextEditor;
+        if (input && input.parentNode) {
+            input.parentNode.removeChild(input);
+        }
+        currentTextEditor = null;
+    }
+
+    function positionTextEditor(shape, input) {
+        const rect = getCanvasRect();
+        const scale = camera.scale || 1;
+        const fontSizeScreen = shape.fontSize * scale;
+
+        ctx.save();
+        ctx.font = `${fontSizeScreen}px sans-serif`;
+        const textWidth = ctx.measureText(shape.text).width;
+        ctx.restore();
+
+        const sx = (shape.x - camera.x) * scale + rect.left;
+        const sy = (shape.y - camera.y) * scale + rect.top - fontSizeScreen;
+
+        input.style.left = `${sx}px`;
+        input.style.top = `${sy}px`;
+        input.style.fontSize = `${fontSizeScreen}px`;
+        input.style.color = shape.color || "#000000";
+        input.style.minWidth = `${textWidth + 10}px`;
+    }
+
+    function showTextEditor(shape) {
+        destroyTextEditor();
+
+        const input = document.createElement("textarea");
+        input.className = "text-editor-overlay";
+        input.value = shape.text || "";
+
+        document.body.appendChild(input);
+        currentTextEditor = { input, shape, originalText: shape.text };
+
+        positionTextEditor(shape, input);
+        input.focus();
+        input.select();
+
+        const commitAndClose = (push = true) => {
+            const newText = input.value || "";
+            shape.text = newText;
+            if (push && newText !== currentTextEditor.originalText) {
+                pushHistory();
+            }
+            destroyTextEditor();
+            render();
+        };
+
+        input.addEventListener("blur", () => commitAndClose(true));
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                commitAndClose(true);
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                destroyTextEditor();
+                render();
+            }
+        });
+    }
+
+    // Apply camera transform, shape position, and rotation, then invoke a callback
+    // that draws in the shape's local coordinate system (0,0 at center, units in world units).
+    function drawTransformedShape(shape, scale, drawLocalCallback) {
+        const s = camera.scale || 1;
+        const sx = (shape.x - camera.x) * s;
+        const sy = (shape.y - camera.y) * s;
+        const rot = shape.rotation || 0;
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(rot);
+        ctx.scale(s, s);
+        drawLocalCallback();
+        ctx.restore();
+    }
+
+    // Rendering
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const scale = camera.scale || 1;
+
+        for (const s of shapes) {
+            if (s.type === "stroke") {
+                drawStroke(s, scale);
+            } else if (s.type === "text") {
+                drawTextShape(s, scale);
+            } else if (s.type === "rect") {
+                drawRectShape(s, scale);
+            } else if (s.type === "circle") {
+                drawCircleShape(s, scale);
+            } else if (s.type === "arrow") {
+                drawArrowShape(s, scale);
+            } else if (s.type === "image") {
+                drawImageShape(s, scale);
+            }
+        }
+
+        if (selectedShape) {
+            drawSelectionOutline(selectedShape, scale);
+        }
+    }
+
+    // Helpers to draw shapes
+    function drawStroke(stroke, scale) {
+        const { points, color, width } = stroke;
+        ctx.strokeStyle = color || "#000000";
+        ctx.lineWidth = width / scale;
+        ctx.lineCap = "round";
+
+        ctx.beginPath();
+        ctx.moveTo((points[0].x - camera.x) * scale, (points[0].y - camera.y) * scale);
+        for (let i = 1; i < points.length; i++) {
+            const p = points[i];
+            ctx.lineTo((p.x - camera.x) * scale, (p.y - camera.y) * scale);
+        }
+        ctx.stroke();
+    }
+
+    function drawTextShape(shape, scale) {
+        const { x, y, text, fontSize, color } = shape;
+        ctx.fillStyle = color || "#000000";
+        ctx.font = `${fontSize * scale}px sans-serif`;
+        ctx.textBaseline = "top";
+
+        const scaledX = (x - camera.x) * scale;
+        const scaledY = (y - camera.y) * scale;
+
+        ctx.fillText(text, scaledX, scaledY);
+    }
+
+    function drawRectShape(shape, scale) {
+        const { x, y, width, height, rotation, strokeColor, fillColor, strokeWidth } = shape;
+        const halfW = (width / 2) * scale;
+        const halfH = (height / 2) * scale;
+
+        ctx.save();
+        ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
+        ctx.rotate(rotation);
+        ctx.strokeStyle = strokeColor || "#000000";
+        ctx.fillStyle = fillColor || "transparent";
+        ctx.lineWidth = strokeWidth / scale;
+
+        ctx.beginPath();
+        ctx.moveTo(-halfW, -halfH);
+        ctx.lineTo(halfW, -halfH);
+        ctx.lineTo(halfW, halfH);
+        ctx.lineTo(-halfW, halfH);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    function drawCircleShape(shape, scale) {
+        const { x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth } = shape;
+        ctx.save();
+        ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
+        ctx.rotate(rotation);
+        ctx.strokeStyle = strokeColor || "#000000";
+        ctx.fillStyle = fillColor || "transparent";
+        ctx.lineWidth = strokeWidth / scale;
+
+        ctx.beginPath();
+        ctx.ellipse(0, 0, rx * scale, ry * scale, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    function drawArrowShape(shape, scale) {
+        const len = shape.length || 100;
+        const strokeWidth = shape.strokeWidth || 2;
+        const headLength = Math.max(10, strokeWidth * 4);
+        const half = len / 2;
+        drawTransformedShape(shape, scale, () => {
+            ctx.strokeStyle = shape.strokeColor || "#000000";
+            ctx.lineWidth = strokeWidth / (camera.scale || 1);
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(-half, 0);
+            ctx.lineTo(half, 0);
+            ctx.stroke();
+
+            // arrowhead at end (right side)
+            ctx.beginPath();
+            ctx.moveTo(half, 0);
+            ctx.lineTo(half - headLength, headLength / 2);
+            ctx.lineTo(half - headLength, -headLength / 2);
+            ctx.closePath();
+            ctx.fillStyle = shape.strokeColor || "#000000";
+            ctx.fill();
+        });
+    }
+
+    function drawImageShape(shape, scale) {
+        const { x, y, width, height, rotation, src } = shape;
+        const img = imageCache.get(src)?.img;
+        if (!img) return;
+
+        ctx.save();
+        ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
+        ctx.rotate(rotation);
+
+        ctx.drawImage(img, -width / 2 * scale, -height / 2 * scale, width * scale, height * scale);
+
+        ctx.restore();
+    }
+
+    function drawSelectionOutline(shape, scale) {
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#007bff";
+
+        if (shape.type === "stroke") {
+            const pts = shape.points;
+            if (pts.length === 0) {
+                ctx.restore();
+                return;
+            }
+            let minX = pts[0].x, maxX = pts[0].x;
+            let minY = pts[0].y, maxY = pts[0].y;
+            for (const p of pts) {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            }
+            const pad = 4;
+            const sx = (minX - pad - camera.x) * scale;
+            const sy = (minY - pad - camera.y) * scale;
+            const w = (maxX - minX + pad * 2) * scale;
+            const h = (maxY - minY + pad * 2) * scale;
+            ctx.strokeRect(sx, sy, w, h);
+        } else if (shape.type === "text") {
+            const fontSizeScreen = shape.fontSize * scale;
+            ctx.font = `${fontSizeScreen}px sans-serif`;
+            const width = ctx.measureText(shape.text).width;
+            const height = fontSizeScreen;
+            const pad = 4;
+            const sx = (shape.x - camera.x) * scale - pad;
+            const sy = (shape.y - camera.y) * scale - height - pad;
+            const w = width + pad * 2;
+            const h = height + pad * 2;
+            ctx.strokeRect(sx, sy, w, h);
+        } else if (shape.type === "rect" || shape.type === "image" || shape.type === "arrow" || shape.type === "circle") {
+            const s = camera.scale || 1;
+            const rot = shape.rotation || 0;
+            let w, h;
+            if (shape.type === "circle") {
+                const rx = shape.rx ?? shape.radius ?? 0;
+                const ry = shape.ry ?? shape.radius ?? 0;
+                w = rx * 2;
+                h = ry * 2;
+            } else if (shape.type === "arrow") {
+                const len = shape.length || 0;
+                const thickness = (shape.strokeWidth || 2) * 4;
+                w = len;
+                h = thickness;
+            } else {
+                w = shape.width || 0;
+                h = shape.height || 0;
+            }
+
+            const cx = (shape.x - camera.x) * s;
+            const cy = (shape.y - camera.y) * s;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(rot);
+            ctx.strokeRect(-w / 2 * s, -h / 2 * s, w * s, h * s);
+
+            // Draw resize handles (4 corners)
+            const hs = 8;
+            const corners = [
+                { id: "tl", x: -w / 2 * s, y: -h / 2 * s },
+                { id: "tr", x: w / 2 * s, y: -h / 2 * s },
+                { id: "br", x: w / 2 * s, y: h / 2 * s },
+                { id: "bl", x: -w / 2 * s, y: h / 2 * s },
+            ];
+            ctx.fillStyle = "#ffffff";
+            ctx.strokeStyle = "#007bff";
+            ctx.setLineDash([]);
+            corners.forEach(c => {
+                ctx.beginPath();
+                ctx.rect(c.x - hs / 2, c.y - hs / 2, hs, hs);
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            // Rotation handle above top-center
+            const rotOffset = 20;
+            const rx = 0;
+            const ry = -h / 2 * s - rotOffset;
+            ctx.beginPath();
+            ctx.arc(rx, ry, 6, 0, Math.PI * 2);
+            ctx.fillStyle = "#007bff";
+            ctx.fill();
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
 
     // Local saves
     let saves = loadSavesFromStorage();
@@ -297,6 +636,10 @@
         updatePenSizeVisibility();
         updateTextSizeVisibility();
         updateColorVisibility();
+    }
+
+    function isTransformableShape(shape) {
+        return shape && (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow" || shape.type === "image");
     }
 
     // Tool switching
@@ -433,6 +776,9 @@
         URL.revokeObjectURL(url);
     });
 
+    // When loading from local saves, we might have image shapes with src values; lazily
+    // loading via drawImageShape will fill the cache, so no special handling needed here.
+
     // LocalStorage helpers
     function loadSavesFromStorage() {
         try {
@@ -467,10 +813,9 @@
         for (const name of names) {
             const opt = document.createElement("option");
             opt.value = name;
-            const label = saves[name]?.updatedAt
+            opt.textContent = saves[name]?.updatedAt
                 ? `${name} (${new Date(saves[name].updatedAt).toLocaleString()})`
                 : name;
-            opt.textContent = label;
             loadLocalSelect.appendChild(opt);
         }
         loadLocalSelect.disabled = names.length === 0;
@@ -529,14 +874,6 @@
         return { x, y };
     }
 
-    function worldToScreen(x, y) {
-        const rect = getCanvasRect();
-        const scale = camera.scale || 1;
-        const sx = (x - camera.x) * scale + rect.left;
-        const sy = (y - camera.y) * scale + rect.top;
-        return { x: sx, y: sy };
-    }
-
     // Distance from point to segment
     function distPointToSegment(px, py, x1, y1, x2, y2) {
         const dx = x2 - x1;
@@ -579,11 +916,34 @@
         const right = shape.x + width;
         const bottom = shape.y;
 
-        if (x >= left - radiusWorld && x <= right + radiusWorld &&
-            y >= top - radiusWorld && y <= bottom + radiusWorld) {
-            return true;
-        }
-        return false;
+        return x >= left - radiusWorld && x <= right + radiusWorld &&
+            y >= top - radiusWorld && y <= bottom + radiusWorld;
+
+    }
+
+    // Hit-test axis-aligned or rotated rect-like shapes (rect/image/arrow) by
+    // transforming the world point into the shape's local space and checking
+    // against a padded half-width/half-height box.
+    function hitTestRectLike(shape, wx, wy, radiusWorld) {
+        const local = worldToLocalForShape(shape, wx, wy);
+        const pad = radiusWorld || 0;
+        const bounds = getShapeBounds(shape);
+        const halfW = (bounds?.width || 0) / 2 + pad;
+        const halfH = (bounds?.height || 0) / 2 + pad;
+        return Math.abs(local.x) <= halfW && Math.abs(local.y) <= halfH;
+    }
+
+    // Hit-test circle/oval shapes by mapping the world point into the
+    // shape's rotated local space and normalizing against rx/ry with
+    // an extra padding radius.
+    function hitTestCircleShape(shape, wx, wy, radiusWorld) {
+        const local = worldToLocalForShape(shape, wx, wy);
+        const rx = shape.rx ?? shape.radius ?? 0;
+        const ry = shape.ry ?? shape.radius ?? 0;
+        const pad = radiusWorld || 0;
+        const nx = local.x / ((rx + pad) || 1e-6);
+        const ny = local.y / ((ry + pad) || 1e-6);
+        return (nx * nx + ny * ny) <= 1;
     }
 
     function hitTestShapes(x, y, radiusWorld) {
@@ -597,9 +957,120 @@
                 if (hitTestStroke(s, x, y, radius)) return s;
             } else if (s.type === "text") {
                 if (hitTestText(s, x, y, radius)) return s;
+            } else if (s.type === "rect" || s.type === "image" || s.type === "arrow") {
+                if (hitTestRectLike(s, x, y, radius)) return s;
+            } else if (s.type === "circle") {
+                if (hitTestCircleShape(s, x, y, radius)) return s;
             }
         }
         return null;
+    }
+
+    function worldToLocalForShape(shape, wx, wy) {
+        const dx = wx - shape.x;
+        const dy = wy - shape.y;
+        const rot = shape.rotation || 0;
+        const cosR = Math.cos(-rot);
+        const sinR = Math.sin(-rot);
+        const lx = dx * cosR - dy * sinR;
+        const ly = dx * sinR + dy * cosR;
+        return { x: lx, y: ly };
+    }
+
+    // Hit-test resize and rotation handles for transformable shapes.
+    function getHandleHitTest(shape, worldX, worldY) {
+        if (!isTransformableShape(shape)) return null;
+        const bounds = getShapeBounds(shape);
+        if (!bounds) return null;
+
+        const scale = camera.scale || 1;
+        const halfW = bounds.width / 2;
+        const halfH = bounds.height / 2;
+
+        // Check resize handles in world space using a fixed pixel radius
+        const handleRadiusPx = 10;
+        const handleRadiusWorld = handleRadiusPx / scale;
+
+        const handleLocals = [
+            { id: "tl", lx: -halfW, ly: -halfH },
+            { id: "tr", lx: halfW,  ly: -halfH },
+            { id: "br", lx: halfW,  ly: halfH },
+            { id: "bl", lx: -halfW, ly: halfH },
+        ];
+
+        const rot = shape.rotation || 0;
+        const cosR = Math.cos(rot);
+        const sinR = Math.sin(rot);
+
+        function localToWorld(lx, ly) {
+            return {
+                x: shape.x + (lx * cosR - ly * sinR),
+                y: shape.y + (lx * sinR + ly * cosR),
+            };
+        }
+
+        for (const h of handleLocals) {
+            const p = localToWorld(h.lx, h.ly);
+            const dx = worldX - p.x;
+            const dy = worldY - p.y;
+            if (dx * dx + dy * dy <= handleRadiusWorld * handleRadiusWorld) {
+                return { type: "resize", id: h.id };
+            }
+        }
+
+        // Rotation handle: use precise world position consistent with drawing
+        const rotHandle = getRotationHandleWorld(shape);
+        if (rotHandle) {
+            const dx = worldX - rotHandle.x;
+            const dy = worldY - rotHandle.y;
+            const r = rotHandle.radiusWorld * 1.5; // slightly more generous
+            if (dx * dx + dy * dy <= r * r) {
+                return { type: "rotate", id: "rot" };
+            }
+        }
+
+        return null;
+    }
+
+    function getShapeBounds(shape) {
+        if (shape.type === "circle") {
+            const rx = shape.rx ?? shape.radius ?? 0;
+            const ry = shape.ry ?? shape.radius ?? 0;
+            return { x: shape.x, y: shape.y, width: rx * 2, height: ry * 2 };
+        } else if (shape.type === "rect" || shape.type === "image" || shape.type === "arrow") {
+            if (shape.type === "arrow") {
+                const len = shape.length || 0;
+                const thickness = (shape.strokeWidth || 2) * 4; // visual thickness of selection box
+                return { x: shape.x, y: shape.y, width: len, height: thickness };
+            }
+            return { x: shape.x, y: shape.y, width: shape.width || 0, height: shape.height || 0 };
+        }
+        return null;
+    }
+
+    // Return world-space coordinates of the rotation handle center and a radius
+    // in world units that matches the drawn blue circle in screen space.
+    function getRotationHandleWorld(shape) {
+        const bounds = getShapeBounds(shape);
+        if (!bounds) return null;
+        const scale = camera.scale || 1;
+
+        const halfH = bounds.height / 2;
+        const rotOffsetScreen = 20; // matches drawSelectionOutline rotOffset
+        const rotOffsetWorld = rotOffsetScreen / scale;
+
+        const localX = 0;
+        const localY = -halfH - rotOffsetWorld;
+
+        const rot = shape.rotation || 0;
+        const cosR = Math.cos(rot);
+        const sinR = Math.sin(rot);
+
+        const wx = shape.x + (localX * cosR - localY * sinR);
+        const wy = shape.y + (localX * sinR + localY * cosR);
+
+        const radiusWorld = 6 / scale; // 6px circle in screen space
+        return { x: wx, y: wy, radiusWorld };
     }
 
     // Erasing
@@ -610,11 +1081,17 @@
         for (let i = shapes.length - 1; i >= 0; i--) {
             const s = shapes[i];
             let hit = false;
-            if (s.type === "stroke" && hitTestStroke(s, x, y, radiusWorld)) {
-                hit = true;
-            } else if (s.type === "text" && hitTestText(s, x, y, radiusWorld)) {
-                hit = true;
+
+            if (s.type === "stroke") {
+                hit = hitTestStroke(s, x, y, radiusWorld);
+            } else if (s.type === "text") {
+                hit = hitTestText(s, x, y, radiusWorld);
+            } else if (s.type === "rect" || s.type === "image" || s.type === "arrow") {
+                hit = hitTestRectLike(s, x, y, radiusWorld);
+            } else if (s.type === "circle") {
+                hit = hitTestCircleShape(s, x, y, radiusWorld);
             }
+
             if (hit) {
                 shapes.splice(i, 1);
                 if (selectedShape === s) selectedShape = null;
@@ -624,186 +1101,40 @@
         }
     }
 
-    // Rendering
-    function render() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const scale = camera.scale || 1;
-
-        for (const s of shapes) {
-            if (s.type === "stroke") {
-                drawStroke(s, scale);
-            } else if (s.type === "text") {
-                drawTextShape(s, scale);
-            }
-        }
-
-        if (selectedShape) {
-            drawSelectionOutline(selectedShape, scale);
-        }
-    }
-
-    function drawStroke(stroke, scale) {
-        if (stroke.points.length < 2) return;
-        ctx.save();
-        ctx.beginPath();
-        const pts = stroke.points;
-        for (let i = 0; i < pts.length; i++) {
-            const sx = (pts[i].x - camera.x) * scale;
-            const sy = (pts[i].y - camera.y) * scale;
-            if (i === 0) ctx.moveTo(sx, sy);
-            else ctx.lineTo(sx, sy);
-        }
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = stroke.width * scale;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.stroke();
-        ctx.restore();
-    }
-
-    function drawTextShape(shape, scale) {
-        ctx.save();
-        const fontSizeScreen = shape.fontSize * scale;
-        ctx.font = `${fontSizeScreen}px sans-serif`;
-        ctx.fillStyle = shape.color;
-        const sx = (shape.x - camera.x) * scale;
-        const sy = (shape.y - camera.y) * scale;
-        ctx.fillText(shape.text, sx, sy);
-        ctx.restore();
-    }
-
-    function drawSelectionOutline(shape, scale) {
-        ctx.save();
-        ctx.setLineDash([5, 5]);
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#007bff";
-
-        if (shape.type === "stroke") {
-            const pts = shape.points;
-            if (pts.length === 0) {
-                ctx.restore();
-                return;
-            }
-            let minX = pts[0].x, maxX = pts[0].x;
-            let minY = pts[0].y, maxY = pts[0].y;
-            for (const p of pts) {
-                if (p.x < minX) minX = p.x;
-                if (p.x > maxX) maxX = p.x;
-                if (p.y < minY) minY = p.y;
-                if (p.y > maxY) maxY = p.y;
-            }
-            const pad = 4;
-            const sx = (minX - pad - camera.x) * scale;
-            const sy = (minY - pad - camera.y) * scale;
-            const w = (maxX - minX + pad * 2) * scale;
-            const h = (maxY - minY + pad * 2) * scale;
-            ctx.strokeRect(sx, sy, w, h);
-        } else if (shape.type === "text") {
-            const fontSizeScreen = shape.fontSize * scale;
-            ctx.font = `${fontSizeScreen}px sans-serif`;
-            const width = ctx.measureText(shape.text).width;
-            const height = fontSizeScreen;
-            const pad = 4;
-            const sx = (shape.x - camera.x) * scale - pad;
-            const sy = (shape.y - camera.y) * scale - height - pad;
-            const w = width + pad * 2;
-            const h = height + pad * 2;
-            ctx.strokeRect(sx, sy, w, h);
-        }
-
-        ctx.restore();
-    }
-
-    // Text editor overlay helpers
-    function destroyTextEditor() {
-        if (currentTextEditor && currentTextEditor.input) {
-            currentTextEditor.input.remove();
-        }
-        currentTextEditor = null;
-    }
-
-    function positionTextEditor(shape, input) {
-        const scale = camera.scale || 1;
-        const rect = getCanvasRect();
-        const fontSizeScreen = shape.fontSize * scale;
-
-        ctx.save();
-        ctx.font = `${fontSizeScreen}px sans-serif`;
-        const textWidth = ctx.measureText(shape.text || "").width;
-        ctx.restore();
-
-        const sx = (shape.x - camera.x) * scale + rect.left;
-        const sy = (shape.y - camera.y) * scale + rect.top - fontSizeScreen;
-
-        const width = Math.max(50, textWidth + 16);
-        const height = fontSizeScreen + 8;
-
-        input.style.left = `${sx}px`;
-        input.style.top = `${sy}px`;
-        input.style.width = `${width}px`;
-        input.style.height = `${height}px`;
-        input.style.fontSize = `${fontSizeScreen}px`;
-        input.style.color = shape.color || "#000000";
-    }
-
-    function showTextEditor(shape) {
-        destroyTextEditor();
-        const input = document.createElement("input");
-        input.type = "text";
-        input.className = "text-editor-overlay";
-        input.value = shape.text || "";
-        document.body.appendChild(input);
-
-        positionTextEditor(shape, input);
-
-        currentTextEditor = { input, shape, originalText: shape.text };
-
-        input.focus();
-        input.select();
-
-        const commit = () => {
-            const newVal = input.value.trim();
-            if (newVal === "") {
-                const idx = shapes.indexOf(shape);
-                if (idx !== -1) shapes.splice(idx, 1);
-                if (selectedShape === shape) selectedShape = null;
-            } else {
-                shape.text = newVal;
-            }
-            destroyTextEditor();
-            pushHistory();
-            updateControlVisibility();
-            render();
-        };
-
-        const cancel = () => {
-            shape.text = currentTextEditor.originalText;
-            destroyTextEditor();
-            render();
-        };
-
-        input.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-                e.preventDefault();
-                commit();
-            } else if (e.key === "Escape") {
-                e.preventDefault();
-                cancel();
-            }
-        });
-
-        input.addEventListener("blur", () => {
-            if (!currentTextEditor || currentTextEditor.input !== input) return;
-            commit();
-        });
-    }
-
     // Shared interaction helpers
     function beginPan(screenX, screenY) {
         isPanning = true;
         panStartScreen = { x: screenX, y: screenY };
         panStartCamera = { x: camera.x, y: camera.y };
         canvas.style.cursor = "grabbing";
+    }
+
+    // Start a resize interaction for a transformable shape and remember original bounds.
+    function beginResize(shape, handleInfo, world) {
+        isResizing = true;
+        activeHandle = handleInfo.id;
+        resizeChanged = false;
+        const b = getShapeBounds(shape);
+        originalBounds = {
+            x: shape.x,
+            y: shape.y,
+            width: b ? b.width : 0,
+            height: b ? b.height : 0,
+            radius: shape.radius || 0,
+            rotation: shape.rotation || 0,
+        };
+        dragStartWorld = { ...world };
+    }
+
+    function beginRotate(shape, world) {
+        isRotating = true;
+        activeHandle = "rot";
+        rotateChanged = false;
+        rotationCenter = { x: shape.x, y: shape.y };
+        const dx = world.x - rotationCenter.x;
+        const dy = world.y - rotationCenter.y;
+        rotationStartAngle = Math.atan2(dy, dx);
+        shapeStartRotation = shape.rotation || 0;
     }
 
     function handlePrimaryDownAtWorld(world, screenX, screenY) {
@@ -825,6 +1156,21 @@
             eraseAt(world.x, world.y);
             render();
         } else if (currentTool === "select") {
+            // First, if we have a selected transformable shape, check handles.
+            // IMPORTANT: do this before any general hit-testing so we don't
+            // immediately fall through into drag-selection when clicking a handle.
+            if (selectedShape && isTransformableShape(selectedShape)) {
+                const handleInfo = getHandleHitTest(selectedShape, world.x, world.y);
+                if (handleInfo) {
+                    if (handleInfo.type === "resize") {
+                        beginResize(selectedShape, handleInfo, world);
+                    } else if (handleInfo.type === "rotate") {
+                        beginRotate(selectedShape, world);
+                    }
+                    return; // don't run hitTestShapes when a handle was hit
+                }
+            }
+
             const hit = hitTestShapes(world.x, world.y);
             selectedShape = hit;
             if (hit) {
@@ -834,6 +1180,8 @@
                 if (hit.type === "stroke") {
                     originalShapeData = hit.points.map(p => ({ x: p.x, y: p.y }));
                 } else if (hit.type === "text") {
+                    originalShapeData = { x: hit.x, y: hit.y };
+                } else if (isTransformableShape(hit)) {
                     originalShapeData = { x: hit.x, y: hit.y };
                 }
             } else {
@@ -859,7 +1207,66 @@
                 updateControlVisibility();
                 render();
             }
-        } else if (currentTool === "hand") {
+        } else if (currentTool === "rect") {
+            const size = 100 / (camera.scale || 1);
+            const shape = {
+                type: "rect",
+                x: world.x,
+                y: world.y,
+                width: size * 1.4,
+                height: size,
+                rotation: 0,
+                strokeColor: penColor,
+                fillColor: null,
+                strokeWidth: penWidth,
+            };
+            shapes.push(shape);
+            selectedShape = shape;
+            pushHistory();
+            // immediately switch to select tool so user can move/resize/rotate
+            currentTool = "select";
+            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
+            updateControlVisibility();
+            render();
+        } else if (currentTool === "circle") {
+            const r = 50 / (camera.scale || 1);
+            const shape = {
+                type: "circle",
+                x: world.x,
+                y: world.y,
+                rx: r,
+                ry: r,
+                rotation: 0,
+                strokeColor: penColor,
+                fillColor: null,
+                strokeWidth: penWidth,
+            };
+            shapes.push(shape);
+            selectedShape = shape;
+            pushHistory();
+            currentTool = "select";
+            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
+            updateControlVisibility();
+            render();
+        } else if (currentTool === "arrow") {
+            const length = 120 / (camera.scale || 1);
+            const shape = {
+                type: "arrow",
+                x: world.x,
+                y: world.y,
+                length,
+                rotation: 0,
+                strokeColor: penColor,
+                strokeWidth: penWidth,
+            };
+            shapes.push(shape);
+            selectedShape = shape;
+            pushHistory();
+            currentTool = "select";
+            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
+            updateControlVisibility();
+            render();
+         } else if (currentTool === "hand") {
             beginPan(screenX, screenY);
         }
     }
@@ -871,23 +1278,77 @@
         } else if (currentTool === "eraser" && isDrawing) {
             eraseAt(world.x, world.y);
             render();
-        } else if (currentTool === "select" && isDraggingSelection && selectedShape) {
-            const dx = world.x - dragStartWorld.x;
-            const dy = world.y - dragStartWorld.y;
+        } else if (currentTool === "select" && selectedShape) {
+            if (isResizing && isTransformableShape(selectedShape) && originalBounds) {
+                const b = originalBounds;
+                const minSize = 10 / (camera.scale || 1);
 
-            if (selectedShape.type === "stroke") {
-                for (let i = 0; i < selectedShape.points.length; i++) {
-                    const orig = originalShapeData[i];
-                    selectedShape.points[i].x = orig.x + dx;
-                    selectedShape.points[i].y = orig.y + dy;
+                // Compute pointer movement in shape-local coordinates so resize
+                // respects current rotation.
+                const localStart = worldToLocalForShape(selectedShape, dragStartWorld.x, dragStartWorld.y);
+                const localNow = worldToLocalForShape(selectedShape, world.x, world.y);
+                const dxLocal = localNow.x - localStart.x;
+                const dyLocal = localNow.y - localStart.y;
+
+                let newW = b.width;
+                let newH = b.height;
+
+                if (activeHandle === "tl") {
+                    newW = Math.max(minSize, b.width - dxLocal);
+                    newH = Math.max(minSize, b.height - dyLocal);
+                } else if (activeHandle === "tr") {
+                    newW = Math.max(minSize, b.width + dxLocal);
+                    newH = Math.max(minSize, b.height - dyLocal);
+                } else if (activeHandle === "br") {
+                    newW = Math.max(minSize, b.width + dxLocal);
+                    newH = Math.max(minSize, b.height + dyLocal);
+                } else if (activeHandle === "bl") {
+                    newW = Math.max(minSize, b.width - dxLocal);
+                    newH = Math.max(minSize, b.height + dyLocal);
                 }
-            } else if (selectedShape.type === "text") {
-                selectedShape.x = originalShapeData.x + dx;
-                selectedShape.y = originalShapeData.y + dy;
-            }
-            moveChanged = true;
-            render();
-        } else if (isPanning) {
+
+                if (selectedShape.type === "circle") {
+                    // allow ovals: map width/height to rx/ry
+                    selectedShape.rx = Math.max(minSize / 2, newW / 2);
+                    selectedShape.ry = Math.max(minSize / 2, newH / 2);
+                } else if (selectedShape.type === "arrow") {
+                    // horizontal size corresponds to arrow length
+                    selectedShape.length = Math.max(minSize, newW);
+                } else {
+                    selectedShape.width = newW;
+                    selectedShape.height = newH;
+                }
+
+                resizeChanged = true;
+                render();
+            } else if (isRotating && isTransformableShape(selectedShape) && rotationCenter) {
+                const dx = world.x - rotationCenter.x;
+                const dy = world.y - rotationCenter.y;
+                const angle = Math.atan2(dy, dx);
+                selectedShape.rotation = shapeStartRotation + (angle - rotationStartAngle);
+                rotateChanged = true;
+                render();
+            } else if (isDraggingSelection) {
+                 const dx = world.x - dragStartWorld.x;
+                 const dy = world.y - dragStartWorld.y;
+
+                 if (selectedShape.type === "stroke") {
+                     for (let i = 0; i < selectedShape.points.length; i++) {
+                         const orig = originalShapeData[i];
+                         selectedShape.points[i].x = orig.x + dx;
+                         selectedShape.points[i].y = orig.y + dy;
+                     }
+                 } else if (selectedShape.type === "text") {
+                     selectedShape.x = originalShapeData.x + dx;
+                     selectedShape.y = originalShapeData.y + dy;
+                 } else if (isTransformableShape(selectedShape)) {
+                     selectedShape.x = originalShapeData.x + dx;
+                     selectedShape.y = originalShapeData.y + dy;
+                 }
+                 moveChanged = true;
+                 render();
+             }
+         } else if (isPanning) {
             const scale = camera.scale || 1;
             const dx = screenX - panStartScreen.x;
             const dy = screenY - panStartScreen.y;
@@ -911,19 +1372,33 @@
         if (currentTool === "eraser" && isDrawing && eraseChanged) {
             pushHistory();
         }
-        if (currentTool === "select" && isDraggingSelection && moveChanged) {
-            pushHistory();
+        if (currentTool === "select") {
+            if (isDraggingSelection && moveChanged) {
+                pushHistory();
+            }
+            if (isResizing && resizeChanged) {
+                pushHistory();
+            }
+            if (isRotating && rotateChanged) {
+                pushHistory();
+            }
         }
 
         isDrawing = false;
         isPanning = false;
         isDraggingSelection = false;
-        isPinching = false;
+        isResizing = false;
+        isRotating = false;
         currentStroke = null;
         dragStartWorld = null;
         originalShapeData = null;
+        originalBounds = null;
+        rotationCenter = null;
+        activeHandle = null;
         eraseChanged = false;
         moveChanged = false;
+        resizeChanged = false;
+        rotateChanged = false;
 
         if (currentTool === "hand") {
             canvas.style.cursor = "grab";
@@ -1098,6 +1573,62 @@
         render();
         showTextEditor(shape);
     });
+
+    // --- Image import ---
+    insertImageButton.addEventListener("click", () => {
+        imageFileInput.click();
+    });
+
+    imageFileInput.addEventListener("change", (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+            // store in cache
+            imageCache.set(url, { img, loaded: true, error: false });
+
+            const baseScale = camera.scale || 1;
+            const maxDimension = Math.min(canvas.width, canvas.height) / baseScale * 0.5;
+            const aspect = img.width / img.height;
+            let w, h;
+            if (aspect >= 1) {
+                w = maxDimension;
+                h = maxDimension / aspect;
+            } else {
+                h = maxDimension;
+                w = maxDimension * aspect;
+            }
+
+            const centerWorldX = camera.x + (canvas.width / 2) / (camera.scale || 1);
+            const centerWorldY = camera.y + (canvas.height / 2) / (camera.scale || 1);
+
+            const shape = {
+                type: "image",
+                x: centerWorldX,
+                y: centerWorldY,
+                width: w,
+                height: h,
+                rotation: 0,
+                src: url,
+            };
+            shapes.push(shape);
+            selectedShape = shape;
+            pushHistory();
+            currentTool = "select";
+            toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
+            updateControlVisibility();
+            render();
+        };
+        img.onerror = () => {
+            imageCache.set(url, { img: null, loaded: false, error: true });
+            URL.revokeObjectURL(url);
+        };
+        img.src = url;
+         // clear the input so same file can be chosen again later
+         imageFileInput.value = "";
+     });
 
     // Initial history snapshot
     pushHistory();
