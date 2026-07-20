@@ -170,6 +170,8 @@
     <span class="group-label">Export:</span>
     <button id="export-png">PNG</button>
     <button id="export-json">JSON</button>
+    <button id="import-json" title="Import a JSON drawing">Import JSON</button>
+    <input type="file" id="json-file-input" accept="application/json,.json" style="display:none" />
 
     <div class="divider"></div>
 
@@ -198,6 +200,8 @@
     const redoButton = document.getElementById("redo");
     const exportPngButton = document.getElementById("export-png");
     const exportJsonButton = document.getElementById("export-json");
+    const importJsonButton = document.getElementById("import-json");
+    const jsonFileInput = document.getElementById("json-file-input");
     const saveLocalButton = document.getElementById("save-local");
     const saveNameInput = document.getElementById("save-name");
     const loadLocalSelect = document.getElementById("load-local");
@@ -213,6 +217,8 @@
     const textSizeInput = document.getElementById("text-size");
 
     const STORAGE_KEY = "drawingPad_saves_v1";
+    const SAVE_DB_NAME = "drawingPadDatabase";
+    const SAVE_STORE_NAME = "saves";
 
     // World / camera state (with zoom)
     let camera = { x: 0, y: 0, scale: 1 };
@@ -632,9 +638,11 @@
     }
 
     // Local saves
-    let saves = loadSavesFromStorage();
+    let saves = {};
     let saveSuccessTimeout = null;
+    let saveOperationQueue = Promise.resolve();
     refreshSavesDropdown();
+    const savesReady = initializeSaveStorage();
 
     // Resize canvas
     function resizeCanvas() {
@@ -866,10 +874,136 @@
         URL.revokeObjectURL(url);
     });
 
+    function normalizeImportedDrawing(data) {
+        if (!data || typeof data !== "object" || !Array.isArray(data.shapes)) {
+            throw new Error("The file does not contain a drawing with a shapes array.");
+        }
+
+        const finite = (value, fallback = 0) => Number.isFinite(value) ? value : fallback;
+        const positive = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback;
+        const normalizedShapes = data.shapes.map((shape, index) => {
+            if (!shape || typeof shape !== "object" || typeof shape.type !== "string") {
+                throw new Error(`Shape ${index + 1} is invalid.`);
+            }
+
+            if (shape.type === "stroke") {
+                if (!Array.isArray(shape.points) || shape.points.length === 0 ||
+                    shape.points.some(point => !Number.isFinite(point?.x) || !Number.isFinite(point?.y))) {
+                    throw new Error(`Stroke ${index + 1} has invalid points.`);
+                }
+                return {
+                    type: "stroke",
+                    points: shape.points.map(point => ({ x: point.x, y: point.y })),
+                    color: typeof shape.color === "string" ? shape.color : "#000000",
+                    width: positive(shape.width, 2),
+                };
+            }
+
+            if (shape.type === "text") {
+                if (typeof shape.text !== "string") throw new Error(`Text shape ${index + 1} is invalid.`);
+                return {
+                    type: "text",
+                    x: finite(shape.x),
+                    y: finite(shape.y),
+                    text: shape.text,
+                    fontSize: positive(shape.fontSize, 20),
+                    color: typeof shape.color === "string" ? shape.color : "#000000",
+                };
+            }
+
+            const common = {
+                type: shape.type,
+                x: finite(shape.x),
+                y: finite(shape.y),
+                rotation: finite(shape.rotation),
+            };
+            if (shape.type === "rect") {
+                return {
+                    ...common,
+                    width: positive(shape.width, 10),
+                    height: positive(shape.height, 10),
+                    strokeColor: typeof shape.strokeColor === "string" ? shape.strokeColor : "#000000",
+                    fillColor: typeof shape.fillColor === "string" ? shape.fillColor : null,
+                    strokeWidth: positive(shape.strokeWidth, 2),
+                };
+            }
+            if (shape.type === "circle") {
+                return {
+                    ...common,
+                    rx: positive(shape.rx ?? shape.radius, 5),
+                    ry: positive(shape.ry ?? shape.radius, 5),
+                    strokeColor: typeof shape.strokeColor === "string" ? shape.strokeColor : "#000000",
+                    fillColor: typeof shape.fillColor === "string" ? shape.fillColor : null,
+                    strokeWidth: positive(shape.strokeWidth, 2),
+                };
+            }
+            if (shape.type === "arrow") {
+                return {
+                    ...common,
+                    length: positive(shape.length, 10),
+                    strokeColor: typeof shape.strokeColor === "string" ? shape.strokeColor : "#000000",
+                    strokeWidth: positive(shape.strokeWidth, 2),
+                };
+            }
+            if (shape.type === "image") {
+                if (typeof shape.src !== "string" || !shape.src) {
+                    throw new Error(`Image shape ${index + 1} has no image data.`);
+                }
+                return {
+                    ...common,
+                    width: positive(shape.width, 10),
+                    height: positive(shape.height, 10),
+                    src: shape.src,
+                };
+            }
+            throw new Error(`Shape ${index + 1} uses unsupported type "${shape.type}".`);
+        });
+
+        const importedCamera = data.camera && typeof data.camera === "object" ? data.camera : {};
+        return {
+            shapes: normalizedShapes,
+            camera: {
+                x: finite(importedCamera.x),
+                y: finite(importedCamera.y),
+                scale: Math.max(0.2, Math.min(5, positive(importedCamera.scale, 1))),
+            },
+        };
+    }
+
+    importJsonButton.addEventListener("click", () => jsonFileInput.click());
+
+    jsonFileInput.addEventListener("change", async () => {
+        const file = jsonFileInput.files?.[0];
+        if (!file) return;
+
+        try {
+            const imported = normalizeImportedDrawing(JSON.parse(await file.text()));
+            if (!await autosaveIfDirty(true)) return;
+
+            destroyTextEditor();
+            shapes = imported.shapes;
+            camera = imported.camera;
+            selectedShape = null;
+            history = [];
+            historyIndex = -1;
+            pushHistory();
+
+            const baseName = file.name.replace(/\.json$/i, "") || "Imported drawing";
+            saveNameInput.value = isAutosaveName(baseName) ? `Imported ${baseName}` : baseName;
+            saveNameInput.setCustomValidity("");
+            switchToSelectTool();
+            render();
+        } catch (error) {
+            alert(`The drawing could not be imported. ${error.message || "Invalid JSON file."}`);
+        } finally {
+            jsonFileInput.value = "";
+        }
+    });
+
     // When loading from local saves, we might have image shapes with src values; lazily
     // loading via drawImageShape will fill the cache, so no special handling needed here.
 
-    // LocalStorage helpers
+    // Legacy localStorage reader used once to migrate existing saves to IndexedDB.
     function loadSavesFromStorage() {
         try {
             const raw = localStorage.getItem(STORAGE_KEY);
@@ -882,11 +1016,90 @@
         }
     }
 
-    function persistSaves(value = saves) {
+    let saveDatabasePromise = null;
+
+    function getSaveDatabase() {
+        if (saveDatabasePromise) return saveDatabasePromise;
+        saveDatabasePromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(SAVE_DB_NAME, 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains(SAVE_STORE_NAME)) {
+                    db.createObjectStore(SAVE_STORE_NAME, { keyPath: "name" });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+        return saveDatabasePromise;
+    }
+
+    async function runSaveTransaction(mode, operation) {
+        const db = await getSaveDatabase();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(SAVE_STORE_NAME, mode);
+            operation(transaction.objectStore(SAVE_STORE_NAME));
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error);
+        });
+    }
+
+    async function readAllSaveRecords() {
+        const db = await getSaveDatabase();
+        return new Promise((resolve, reject) => {
+            const request = db.transaction(SAVE_STORE_NAME, "readonly")
+                .objectStore(SAVE_STORE_NAME).getAll();
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    function writeSaveRecords(records) {
+        return runSaveTransaction("readwrite", store => {
+            records.forEach(record => store.put(record));
+        });
+    }
+
+    function deleteSaveRecords(names) {
+        if (names.length === 0) return Promise.resolve();
+        return runSaveTransaction("readwrite", store => {
+            names.forEach(name => store.delete(name));
+        });
+    }
+
+    async function initializeSaveStorage() {
         try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+            let records = await readAllSaveRecords();
+            const existingNames = new Set(records.map(record => record.name));
+            const legacySaves = loadSavesFromStorage();
+            const recordsToMigrate = Object.entries(legacySaves)
+                .filter(([name]) => !existingNames.has(name))
+                .map(([name, save]) => ({ name, ...save }));
+
+            if (recordsToMigrate.length > 0) {
+                await writeSaveRecords(recordsToMigrate);
+                records = records.concat(recordsToMigrate);
+            }
+            if (Object.keys(legacySaves).length > 0) {
+                try {
+                    localStorage.removeItem(STORAGE_KEY);
+                } catch {
+                    // Migration already succeeded; leaving the legacy copy is harmless.
+                }
+            }
+
+            saves = {};
+            records.forEach(({ name, ...save }) => {
+                saves[name] = save;
+            });
+            const loadedNames = Object.keys(saves);
+            pruneAutosaves(saves);
+            await deleteSaveRecords(loadedNames.filter(name => !saves[name]));
+            refreshSavesDropdown();
             return true;
-        } catch {
+        } catch (error) {
+            console.error("Could not initialize drawing save storage", error);
             return false;
         }
     }
@@ -938,7 +1151,19 @@
         }, 1500);
     }
 
-    function storeDrawing(name, { showSuccess = false, showError = false } = {}) {
+    function storeDrawing(name, options = {}) {
+        const operation = () => performStoreDrawing(name, options);
+        const result = saveOperationQueue.then(operation, operation);
+        saveOperationQueue = result.then(() => undefined, () => undefined);
+        return result;
+    }
+
+    async function performStoreDrawing(name, { showSuccess = false, showError = false } = {}) {
+        if (!await savesReady) {
+            if (showError) alert("Persistent drawing storage is unavailable in this browser.");
+            return false;
+        }
+
         const nextSaves = {
             ...saves,
             [name]: {
@@ -949,7 +1174,13 @@
         };
         pruneAutosaves(nextSaves);
 
-        if (!persistSaves(nextSaves)) {
+        const removedSaveNames = Object.keys(saves)
+            .filter(existingName => !nextSaves[existingName]);
+        try {
+            await writeSaveRecords([{ name, ...nextSaves[name] }]);
+            await deleteSaveRecords(removedSaveNames);
+        } catch (error) {
+            console.error("Could not save drawing", error);
             if (showError) {
                 alert("The drawing could not be saved. Your changes are still unsaved.");
             }
@@ -963,7 +1194,7 @@
         return true;
     }
 
-    function autosaveIfDirty(showError = false) {
+    async function autosaveIfDirty(showError = false) {
         if (currentTextEditor) {
             currentTextEditor.shape.text = currentTextEditor.input.value || "";
         }
@@ -973,7 +1204,7 @@
         return storeDrawing(autosaveName, { showError });
     }
 
-    function saveNamedDrawing() {
+    async function saveNamedDrawing() {
         destroyTextEditor();
         const name = saveNameInput.value.trim();
         if (!name) {
@@ -987,7 +1218,7 @@
             return;
         }
         saveNameInput.setCustomValidity("");
-        storeDrawing(name, { showSuccess: true, showError: true });
+        await storeDrawing(name, { showSuccess: true, showError: true });
     }
 
     saveLocalButton.addEventListener("click", saveNamedDrawing);
@@ -1003,11 +1234,11 @@
         }
     });
 
-    loadLocalSelect.addEventListener("change", () => {
+    loadLocalSelect.addEventListener("change", async () => {
         const name = loadLocalSelect.value;
         if (!name || !saves[name]) return;
 
-        if (!autosaveIfDirty(true)) {
+        if (!await autosaveIfDirty(true)) {
             loadLocalSelect.value = "";
             return;
         }
@@ -1031,6 +1262,9 @@
 
     setInterval(() => autosaveIfDirty(false), 30000);
     window.addEventListener("beforeunload", () => autosaveIfDirty(false));
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") autosaveIfDirty(false);
+    });
 
     // Coordinate helpers
     function getCanvasRect() {
