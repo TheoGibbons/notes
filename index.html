@@ -641,6 +641,7 @@
     let saves = {};
     let saveSuccessTimeout = null;
     let saveOperationQueue = Promise.resolve();
+    let saveDatabasePromise = null;
     refreshSavesDropdown();
     const savesReady = initializeSaveStorage();
 
@@ -1015,8 +1016,6 @@
             return {};
         }
     }
-
-    let saveDatabasePromise = null;
 
     function getSaveDatabase() {
         if (saveDatabasePromise) return saveDatabasePromise;
