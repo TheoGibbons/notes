@@ -501,7 +501,7 @@
         const len = shape.length ?? 0;
         if (len <= 0) return;
         const strokeWidth = shape.strokeWidth || 2;
-        const headLength = Math.max(10, strokeWidth * 4);
+        const headLength = Math.min(Math.max(10, strokeWidth * 4), len * 0.5);
         const half = len / 2;
         drawTransformedShape(shape, scale, () => {
             ctx.strokeStyle = shape.strokeColor || "#000000";
@@ -509,7 +509,7 @@
             ctx.lineCap = "round";
             ctx.beginPath();
             ctx.moveTo(-half, 0);
-            ctx.lineTo(half, 0);
+            ctx.lineTo(half - headLength, 0);
             ctx.stroke();
 
             // arrowhead at end (right side)
@@ -579,7 +579,27 @@
             const w = width + pad * 2;
             const h = height + pad * 2;
             ctx.strokeRect(sx, sy, w, h);
-        } else if (shape.type === "rect" || shape.type === "image" || shape.type === "arrow" || shape.type === "circle") {
+        } else if (shape.type === "arrow") {
+            const s = camera.scale || 1;
+            const halfLength = (shape.length || 0) / 2 * s;
+            ctx.save();
+            ctx.translate((shape.x - camera.x) * s, (shape.y - camera.y) * s);
+            ctx.rotate(shape.rotation || 0);
+            ctx.beginPath();
+            ctx.moveTo(-halfLength, 0);
+            ctx.lineTo(halfLength, 0);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = "#ffffff";
+            ctx.strokeStyle = "#007bff";
+            [-halfLength, halfLength].forEach(endpointX => {
+                ctx.beginPath();
+                ctx.arc(endpointX, 0, 6, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+            });
+            ctx.restore();
+        } else if (shape.type === "rect" || shape.type === "image" || shape.type === "circle") {
             const s = camera.scale || 1;
             const rot = shape.rotation || 0;
             let w, h;
@@ -588,11 +608,6 @@
                 const ry = shape.ry ?? shape.radius ?? 0;
                 w = rx * 2;
                 h = ry * 2;
-            } else if (shape.type === "arrow") {
-                const len = shape.length || 0;
-                const thickness = (shape.strokeWidth || 2) * 4;
-                w = len;
-                h = thickness;
             } else {
                 w = shape.width || 0;
                 h = shape.height || 0;
@@ -1383,6 +1398,28 @@
         return { x: lx, y: ly };
     }
 
+    function worldToLocalForBounds(bounds, wx, wy) {
+        const dx = wx - bounds.x;
+        const dy = wy - bounds.y;
+        const rotation = bounds.rotation || 0;
+        const cosR = Math.cos(-rotation);
+        const sinR = Math.sin(-rotation);
+        return {
+            x: dx * cosR - dy * sinR,
+            y: dx * sinR + dy * cosR,
+        };
+    }
+
+    function localToWorldForBounds(bounds, lx, ly) {
+        const rotation = bounds.rotation || 0;
+        const cosR = Math.cos(rotation);
+        const sinR = Math.sin(rotation);
+        return {
+            x: bounds.x + lx * cosR - ly * sinR,
+            y: bounds.y + lx * sinR + ly * cosR,
+        };
+    }
+
     // Hit-test resize and rotation handles for transformable shapes.
     function getHandleHitTest(shape, worldX, worldY) {
         if (!isTransformableShape(shape)) return null;
@@ -1390,13 +1427,24 @@
         if (!bounds) return null;
 
         const scale = camera.scale || 1;
+        const handleRadiusWorld = 10 / scale;
+
+        if (shape.type === "arrow") {
+            const local = worldToLocalForShape(shape, worldX, worldY);
+            const halfLength = (shape.length || 0) / 2;
+            if (Math.hypot(local.x + halfLength, local.y) <= handleRadiusWorld) {
+                return { type: "resize", id: "start" };
+            }
+            if (Math.hypot(local.x - halfLength, local.y) <= handleRadiusWorld) {
+                return { type: "resize", id: "end" };
+            }
+            return null;
+        }
+
         const halfW = bounds.width / 2;
         const halfH = bounds.height / 2;
 
         // Check resize handles in world space using a fixed pixel radius
-        const handleRadiusPx = 10;
-        const handleRadiusWorld = handleRadiusPx / scale;
-
         const handleLocals = [
             { id: "tl", lx: -halfW, ly: -halfH },
             { id: "tr", lx: halfW,  ly: -halfH },
@@ -1530,6 +1578,44 @@
             rotation: shape.rotation || 0,
         };
         dragStartWorld = { ...world };
+    }
+
+    function resizeArrowEndpoint(shape, bounds, world, minLength) {
+        const halfLength = bounds.width / 2;
+        const start = localToWorldForBounds(bounds, -halfLength, 0);
+        const end = localToWorldForBounds(bounds, halfLength, 0);
+        const pointerDx = world.x - dragStartWorld.x;
+        const pointerDy = world.y - dragStartWorld.y;
+
+        let nextStart = start;
+        let nextEnd = end;
+        if (activeHandle === "start") {
+            nextStart = { x: start.x + pointerDx, y: start.y + pointerDy };
+        } else {
+            nextEnd = { x: end.x + pointerDx, y: end.y + pointerDy };
+        }
+
+        let dx = nextEnd.x - nextStart.x;
+        let dy = nextEnd.y - nextStart.y;
+        let length = Math.hypot(dx, dy);
+        const angle = length > 0 ? Math.atan2(dy, dx) : bounds.rotation;
+        if (length < minLength) {
+            const ux = Math.cos(angle);
+            const uy = Math.sin(angle);
+            length = minLength;
+            if (activeHandle === "start") {
+                nextStart = { x: nextEnd.x - ux * length, y: nextEnd.y - uy * length };
+            } else {
+                nextEnd = { x: nextStart.x + ux * length, y: nextStart.y + uy * length };
+            }
+            dx = nextEnd.x - nextStart.x;
+            dy = nextEnd.y - nextStart.y;
+        }
+
+        shape.x = (nextStart.x + nextEnd.x) / 2;
+        shape.y = (nextStart.y + nextEnd.y) / 2;
+        shape.length = length;
+        shape.rotation = Math.atan2(dy, dx);
     }
 
     function beginRotate(shape, world) {
@@ -1713,29 +1799,30 @@
                 const b = originalBounds;
                 const minSize = 10 / (camera.scale || 1);
 
-                // Compute pointer movement in shape-local coordinates so resize
-                // respects current rotation.
-                const localStart = worldToLocalForShape(selectedShape, dragStartWorld.x, dragStartWorld.y);
-                const localNow = worldToLocalForShape(selectedShape, world.x, world.y);
+                if (selectedShape.type === "arrow" &&
+                    (activeHandle === "start" || activeHandle === "end")) {
+                    resizeArrowEndpoint(selectedShape, b, world, minSize);
+                    resizeChanged = true;
+                    render();
+                    return;
+                }
+
+                // Measure in the original rotated coordinate system. The shape's
+                // center changes during this interaction, so using its live center
+                // would make the dragged corner drift.
+                const localStart = worldToLocalForBounds(b, dragStartWorld.x, dragStartWorld.y);
+                const localNow = worldToLocalForBounds(b, world.x, world.y);
                 const dxLocal = localNow.x - localStart.x;
                 const dyLocal = localNow.y - localStart.y;
 
-                let newW = b.width;
-                let newH = b.height;
-
-                if (activeHandle === "tl") {
-                    newW = Math.max(minSize, b.width - dxLocal);
-                    newH = Math.max(minSize, b.height - dyLocal);
-                } else if (activeHandle === "tr") {
-                    newW = Math.max(minSize, b.width + dxLocal);
-                    newH = Math.max(minSize, b.height - dyLocal);
-                } else if (activeHandle === "br") {
-                    newW = Math.max(minSize, b.width + dxLocal);
-                    newH = Math.max(minSize, b.height + dyLocal);
-                } else if (activeHandle === "bl") {
-                    newW = Math.max(minSize, b.width - dxLocal);
-                    newH = Math.max(minSize, b.height + dyLocal);
-                }
+                const signX = activeHandle === "tr" || activeHandle === "br" ? 1 : -1;
+                const signY = activeHandle === "bl" || activeHandle === "br" ? 1 : -1;
+                const fixedX = -signX * b.width / 2;
+                const fixedY = -signY * b.height / 2;
+                const originalDraggedX = signX * b.width / 2;
+                const originalDraggedY = signY * b.height / 2;
+                let newW = Math.max(minSize, signX * (originalDraggedX + dxLocal - fixedX));
+                let newH = Math.max(minSize, signY * (originalDraggedY + dyLocal - fixedY));
 
                 if (selectedShape.type === "image" && keepAspectRatio && b.width > 0 && b.height > 0) {
                     const widthScale = newW / b.width;
@@ -1751,13 +1838,20 @@
                     newH = b.height * uniformScale;
                 }
 
+                // Move the center by half the size change, leaving the corner
+                // opposite the dragged handle fixed in world space.
+                const newCenter = localToWorldForBounds(
+                    b,
+                    fixedX + signX * newW / 2,
+                    fixedY + signY * newH / 2
+                );
+                selectedShape.x = newCenter.x;
+                selectedShape.y = newCenter.y;
+
                 if (selectedShape.type === "circle") {
                     // allow ovals: map width/height to rx/ry
                     selectedShape.rx = Math.max(minSize / 2, newW / 2);
                     selectedShape.ry = Math.max(minSize / 2, newH / 2);
-                } else if (selectedShape.type === "arrow") {
-                    // horizontal size corresponds to arrow length
-                    selectedShape.length = Math.max(minSize, newW);
                 } else {
                     selectedShape.width = newW;
                     selectedShape.height = newH;
