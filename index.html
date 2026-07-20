@@ -122,25 +122,25 @@
 </head>
 <body>
 <div class="toolbar">
-    <button data-tool="pen" class="active">Pen</button>
-    <button data-tool="text">Text</button>
+    <button data-tool="pen" class="active" title="Pen (P)">Pen</button>
+    <button data-tool="text" title="Text (T)">Text</button>
 
     <div class="divider"></div>
 
-    <button data-tool="rect">Rect</button>
-    <button data-tool="circle">Circle</button>
-    <button data-tool="arrow">Arrow</button>
+    <button data-tool="rect" title="Rectangle (R)">Rect</button>
+    <button data-tool="circle" title="Circle (C)">Circle</button>
+    <button data-tool="arrow" title="Arrow (A)">Arrow</button>
 
     <div class="divider"></div>
 
-    <button id="insert-image" title="Insert an image file or paste one with Ctrl+V">Image</button>
+    <button id="insert-image" title="Insert image (I) or paste one with Ctrl+V">Image</button>
     <input type="file" id="image-file-input" accept="image/*" style="display:none" />
 
     <div class="divider"></div>
 
-    <button data-tool="eraser">Eraser</button>
-    <button data-tool="select">Select / Move</button>
-    <button data-tool="hand">Hand / Pan</button>
+    <button data-tool="eraser" title="Eraser (E)">Eraser</button>
+    <button data-tool="select" title="Select / Move (V)">Select / Move</button>
+    <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
 
     <div class="divider"></div>
 
@@ -335,7 +335,7 @@
         ctx.restore();
 
         const sx = (shape.x - camera.x) * scale + rect.left;
-        const sy = (shape.y - camera.y) * scale + rect.top - fontSizeScreen;
+        const sy = (shape.y - camera.y) * scale + rect.top;
 
         input.style.left = `${sx}px`;
         input.style.top = `${sy}px`;
@@ -569,7 +569,7 @@
             const height = fontSizeScreen;
             const pad = 4;
             const sx = (shape.x - camera.x) * scale - pad;
-            const sy = (shape.y - camera.y) * scale - height - pad;
+            const sy = (shape.y - camera.y) * scale - pad;
             const w = width + pad * 2;
             const h = height + pad * 2;
             ctx.strokeRect(sx, sy, w, h);
@@ -786,6 +786,18 @@
         }
     });
 
+    const toolHotkeys = {
+        a: "arrow",
+        c: "circle",
+        e: "eraser",
+        h: "hand",
+        i: "image",
+        p: "pen",
+        r: "rect",
+        t: "text",
+        v: "select",
+    };
+
     // Keyboard shortcuts
     window.addEventListener("keydown", (e) => {
         const targetIsEditable = e.target instanceof HTMLInputElement ||
@@ -805,6 +817,18 @@
                 pushHistory();
                 updateControlVisibility();
                 render();
+            }
+        } else if (!targetIsEditable && !e.ctrlKey && !e.metaKey && !e.altKey &&
+            !e.repeat && toolHotkeys[e.key.toLowerCase()]) {
+            e.preventDefault();
+            stopAllInteractions(true);
+            const tool = toolHotkeys[e.key.toLowerCase()];
+            if (tool === "image") {
+                insertImageButton.click();
+            } else {
+                const toolButton = Array.from(toolbarButtons)
+                    .find(button => button.dataset.tool === tool);
+                toolButton?.click();
             }
         } else if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "z") {
             e.preventDefault();
@@ -1061,9 +1085,9 @@
         ctx.restore();
         const height = shape.fontSize;
         const left = shape.x;
-        const top = shape.y - height;
+        const top = shape.y;
         const right = shape.x + width;
-        const bottom = shape.y;
+        const bottom = shape.y + height;
 
         return x >= left - radiusWorld && x <= right + radiusWorld &&
             y >= top - radiusWorld && y <= bottom + radiusWorld;
@@ -1451,7 +1475,7 @@
         } else if (currentTool === "eraser" && isDrawing) {
             eraseAt(world.x, world.y);
             render();
-        } else if (currentTool === "select" && selectedShape) {
+        } else if (currentTool === "select" && selectedShape && !isPanning) {
             if (isResizing && isTransformableShape(selectedShape) && originalBounds) {
                 const b = originalBounds;
                 const minSize = 10 / (camera.scale || 1);
