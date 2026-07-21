@@ -432,7 +432,7 @@
     function drawStroke(stroke, scale) {
         const { points, color, width } = stroke;
         ctx.strokeStyle = color || "#000000";
-        ctx.lineWidth = width / scale;
+        ctx.lineWidth = width * scale;
         ctx.lineCap = "round";
 
         ctx.beginPath();
@@ -466,7 +466,7 @@
         ctx.rotate(rotation);
         ctx.strokeStyle = strokeColor || "#000000";
         ctx.fillStyle = fillColor || "transparent";
-        ctx.lineWidth = strokeWidth / scale;
+        ctx.lineWidth = strokeWidth * scale;
 
         ctx.beginPath();
         ctx.moveTo(-halfW, -halfH);
@@ -487,7 +487,7 @@
         ctx.rotate(rotation);
         ctx.strokeStyle = strokeColor || "#000000";
         ctx.fillStyle = fillColor || "transparent";
-        ctx.lineWidth = strokeWidth / scale;
+        ctx.lineWidth = strokeWidth * scale;
 
         ctx.beginPath();
         ctx.ellipse(0, 0, rx * scale, ry * scale, 0, 0, Math.PI * 2);
@@ -505,7 +505,7 @@
         const half = len / 2;
         drawTransformedShape(shape, scale, () => {
             ctx.strokeStyle = shape.strokeColor || "#000000";
-            ctx.lineWidth = strokeWidth / (camera.scale || 1);
+            ctx.lineWidth = strokeWidth;
             ctx.lineCap = "round";
             ctx.beginPath();
             ctx.moveTo(-half, 0);
