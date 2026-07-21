@@ -34,6 +34,7 @@
         .toolbar button,
         .toolbar select,
         .toolbar input[type="text"],
+        .toolbar input[type="number"],
         .toolbar input[type="color"],
         .toolbar input[type="range"] {
             border: 1px solid #ccc;
@@ -54,6 +55,10 @@
         .toolbar input[type="text"] {
             cursor: text;
             width: 150px;
+        }
+        .toolbar input[type="number"] {
+            cursor: text;
+            width: 58px;
         }
         .toolbar button.active {
             background: #007bff;
@@ -92,6 +97,8 @@
         }
         #pen-size-container,
         #color-container,
+        #fill-container,
+        #layer-container,
         #text-size-container {
             display: none;
             align-items: center;
@@ -104,6 +111,24 @@
             cursor: crosshair;
             touch-action: none; /* hint for some browsers */
         }
+        #canvas.drawing-pad.rectangle-mode {
+            cursor: url("./rectangle-cursor.svg") 16 16, crosshair;
+        }
+        #canvas.drawing-pad.pen-mode {
+            cursor: url("./pen-cursor.svg") 5 27, crosshair;
+        }
+        #canvas.drawing-pad.text-mode {
+            cursor: text;
+        }
+        #canvas.drawing-pad.circle-mode {
+            cursor: url("./circle-cursor.svg") 16 16, crosshair;
+        }
+        #canvas.drawing-pad.arrow-mode {
+            cursor: url("./arrow-cursor.svg") 8 8, crosshair;
+        }
+        #canvas.drawing-pad.eraser-mode {
+            cursor: url("./eraser-cursor.svg") 7 26, crosshair;
+        }
         .text-editor-overlay {
             position: absolute;
             border: 1px solid #007bff;
@@ -113,6 +138,9 @@
             box-shadow: 0 0 0 1px rgba(0,123,255,0.2);
             outline: none;
             z-index: 10;
+            line-height: 1.2;
+            overflow: hidden;
+            resize: none;
         }
 
         .toolbar>* {
@@ -149,6 +177,13 @@
         <input type="color" id="pen-color" value="#000000" />
     </div>
 
+    <div id="fill-container" class="inline-group">
+        <label class="group-label" for="fill-enabled">
+            <input type="checkbox" id="fill-enabled" /> Fill:
+        </label>
+        <input type="color" id="fill-color" value="#ffff00" disabled />
+    </div>
+
     <div id="pen-size-container" class="inline-group">
         <label class="group-label" for="pen-size">Pen size:</label>
         <input type="range" id="pen-size" min="1" max="20" value="2" />
@@ -156,7 +191,14 @@
 
     <div id="text-size-container" class="inline-group">
         <label class="group-label" for="text-size">Text size:</label>
-        <input type="range" id="text-size" min="8" max="72" value="20" />
+        <input type="range" id="text-size" min="1" max="72" value="20" />
+        <input type="number" id="text-size-value" min="1" step="1" value="20" aria-label="Text size value" />
+    </div>
+
+    <div id="layer-container" class="inline-group">
+        <span class="group-label">Order:</span>
+        <button id="send-to-back" title="Send selected item behind everything">Send to Back</button>
+        <button id="bring-to-front" title="Bring selected item in front of everything">Bring to Front</button>
     </div>
 
     <div class="divider"></div>
@@ -185,7 +227,7 @@
     <button id="clear">Clear</button>
 </div>
 
-<canvas id="canvas"></canvas>
+<canvas id="canvas" class="drawing-pad pen-mode"></canvas>
 
 <script>
     // Cache loaded images so we don't recreate them every frame
@@ -211,10 +253,17 @@
 
     const colorContainer = document.getElementById("color-container");
     const penColorInput = document.getElementById("pen-color");
+    const fillContainer = document.getElementById("fill-container");
+    const fillEnabledInput = document.getElementById("fill-enabled");
+    const fillColorInput = document.getElementById("fill-color");
     const penSizeContainer = document.getElementById("pen-size-container");
     const penSizeInput = document.getElementById("pen-size");
     const textSizeContainer = document.getElementById("text-size-container");
     const textSizeInput = document.getElementById("text-size");
+    const textSizeValueInput = document.getElementById("text-size-value");
+    const layerContainer = document.getElementById("layer-container");
+    const sendToBackButton = document.getElementById("send-to-back");
+    const bringToFrontButton = document.getElementById("bring-to-front");
 
     const STORAGE_KEY = "drawingPad_saves_v1";
     const SAVE_DB_NAME = "drawingPadDatabase";
@@ -315,6 +364,8 @@
     let penColor = "#000000";
     let penWidth = 2;
     let textSize = 20;
+    let fillEnabled = false;
+    let fillColor = "#ffff00";
     const ERASER_RADIUS = 10;   // screen px
     const HIT_TEST_RADIUS = 8;  // screen px
 
@@ -330,15 +381,15 @@
         currentTextEditor = null;
     }
 
+    function commitCurrentTextEditor() {
+        currentTextEditor?.commit();
+    }
+
     function positionTextEditor(shape, input) {
         const rect = getCanvasRect();
         const scale = camera.scale || 1;
         const fontSizeScreen = shape.fontSize * scale;
-
-        ctx.save();
-        ctx.font = `${fontSizeScreen}px sans-serif`;
-        const textWidth = ctx.measureText(shape.text).width;
-        ctx.restore();
+        const metrics = measureTextBlock(input.value, fontSizeScreen);
 
         const sx = (shape.x - camera.x) * scale + rect.left;
         const sy = (shape.y - camera.y) * scale + rect.top;
@@ -347,42 +398,81 @@
         input.style.top = `${sy}px`;
         input.style.fontSize = `${fontSizeScreen}px`;
         input.style.color = shape.color || "#000000";
-        input.style.minWidth = `${textWidth + 10}px`;
+        input.style.width = `${Math.max(60, metrics.width + 12)}px`;
+        input.style.height = `${Math.max(fontSizeScreen * 1.2 + 8, metrics.height + 8)}px`;
     }
 
-    function showTextEditor(shape) {
-        destroyTextEditor();
+    function measureTextBlock(text, fontSize) {
+        const lines = String(text ?? "").split(/\r?\n/);
+        const lineHeight = fontSize * 1.2;
+        ctx.save();
+        ctx.font = `${fontSize}px sans-serif`;
+        const width = lines.reduce((maxWidth, line) =>
+            Math.max(maxWidth, ctx.measureText(line || " ").width), 0);
+        ctx.restore();
+        return { lines, lineHeight, width, height: lines.length * lineHeight };
+    }
+
+    function showTextEditor(shape, isNew = false) {
+        commitCurrentTextEditor();
 
         const input = document.createElement("textarea");
         input.className = "text-editor-overlay";
         input.value = shape.text || "";
 
         document.body.appendChild(input);
-        currentTextEditor = { input, shape, originalText: shape.text };
+        const editorState = { input, shape, originalText: shape.text, isNew, commit: null };
+        currentTextEditor = editorState;
 
         positionTextEditor(shape, input);
-        input.focus();
-        input.select();
 
         const commitAndClose = (push = true) => {
+            if (currentTextEditor !== editorState) return;
             const newText = input.value || "";
-            shape.text = newText;
-            if (push && newText !== currentTextEditor.originalText) {
+            if (isNew && newText.trim() === "") {
+                const shapeIndex = shapes.indexOf(shape);
+                if (shapeIndex !== -1) shapes.splice(shapeIndex, 1);
+                if (selectedShape === shape) selectedShape = null;
+            } else {
+                shape.text = newText;
+            }
+            const changed = isNew
+                ? newText.trim() !== ""
+                : newText !== editorState.originalText;
+            if (push && changed) {
                 pushHistory();
             }
             destroyTextEditor();
+            updateControlVisibility();
             render();
         };
+        editorState.commit = () => commitAndClose(true);
 
         input.addEventListener("blur", () => commitAndClose(true));
+        input.addEventListener("input", () => positionTextEditor(shape, input));
         input.addEventListener("keydown", (e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 commitAndClose(true);
             } else if (e.key === "Escape") {
                 e.preventDefault();
+                if (isNew) {
+                    const shapeIndex = shapes.indexOf(shape);
+                    if (shapeIndex !== -1) shapes.splice(shapeIndex, 1);
+                    if (selectedShape === shape) selectedShape = null;
+                }
                 destroyTextEditor();
+                updateControlVisibility();
                 render();
+            }
+        });
+
+        // Wait until the canvas click that created the editor has finished.
+        // Otherwise that same mousedown can immediately blur and remove it.
+        requestAnimationFrame(() => {
+            if (currentTextEditor === editorState && input.isConnected) {
+                input.focus({ preventScroll: true });
+                input.select();
             }
         });
     }
@@ -449,11 +539,14 @@
         ctx.fillStyle = color || "#000000";
         ctx.font = `${fontSize * scale}px sans-serif`;
         ctx.textBaseline = "top";
+        const metrics = measureTextBlock(text, fontSize * scale);
 
         const scaledX = (x - camera.x) * scale;
         const scaledY = (y - camera.y) * scale;
 
-        ctx.fillText(text, scaledX, scaledY);
+        metrics.lines.forEach((line, index) => {
+            ctx.fillText(line, scaledX, scaledY + index * metrics.lineHeight);
+        });
     }
 
     function drawRectShape(shape, scale) {
@@ -570,14 +663,12 @@
             ctx.strokeRect(sx, sy, w, h);
         } else if (shape.type === "text") {
             const fontSizeScreen = shape.fontSize * scale;
-            ctx.font = `${fontSizeScreen}px sans-serif`;
-            const width = ctx.measureText(shape.text).width;
-            const height = fontSizeScreen;
+            const metrics = measureTextBlock(shape.text, fontSizeScreen);
             const pad = 4;
             const sx = (shape.x - camera.x) * scale - pad;
             const sy = (shape.y - camera.y) * scale - pad;
-            const w = width + pad * 2;
-            const h = height + pad * 2;
+            const w = metrics.width + pad * 2;
+            const h = metrics.height + pad * 2;
             ctx.strokeRect(sx, sy, w, h);
         } else if (shape.type === "arrow") {
             const s = camera.scale || 1;
@@ -682,6 +773,11 @@
 
     function updateTextSizeVisibility() {
         const hasSelectedText = selectedShape && selectedShape.type === "text";
+        if (currentTool === "select" && hasSelectedText) {
+            textSize = selectedShape.fontSize;
+            textSizeInput.value = Math.min(72, Math.max(1, textSize)).toString();
+            textSizeValueInput.value = textSize.toString();
+        }
         textSizeContainer.style.display =
             currentTool === "text" || hasSelectedText ? "inline-flex" : "none";
     }
@@ -694,14 +790,68 @@
             isColorDrawingTool || hasColorableSelection ? "inline-flex" : "none";
     }
 
+    function isFillableShape(shape) {
+        return shape && (shape.type === "rect" || shape.type === "circle");
+    }
+
+    function updateFillVisibility() {
+        const isFillDrawingTool = currentTool === "rect" || currentTool === "circle";
+        if (currentTool === "select" && isFillableShape(selectedShape)) {
+            fillEnabled = !!selectedShape.fillColor;
+            fillEnabledInput.checked = fillEnabled;
+            if (selectedShape.fillColor) {
+                fillColor = selectedShape.fillColor;
+                fillColorInput.value = fillColor;
+            }
+        }
+        fillContainer.style.display = isFillDrawingTool || isFillableShape(selectedShape)
+            ? "inline-flex"
+            : "none";
+        fillColorInput.disabled = !fillEnabledInput.checked;
+    }
+
+    function updateLayerVisibility() {
+        const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
+        layerContainer.style.display = selectedIndex === -1 ? "none" : "inline-flex";
+        sendToBackButton.disabled = selectedIndex <= 0;
+        bringToFrontButton.disabled = selectedIndex === -1 || selectedIndex >= shapes.length - 1;
+    }
+
     function updateControlVisibility() {
         updatePenSizeVisibility();
         updateTextSizeVisibility();
         updateColorVisibility();
+        updateFillVisibility();
+        updateLayerVisibility();
     }
 
     function isTransformableShape(shape) {
         return shape && (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow" || shape.type === "image");
+    }
+
+    const toolCursorClasses = {
+        pen: "pen-mode",
+        text: "text-mode",
+        rect: "rectangle-mode",
+        circle: "circle-mode",
+        arrow: "arrow-mode",
+        eraser: "eraser-mode",
+    };
+
+    function updateCanvasCursor() {
+        Object.values(toolCursorClasses).forEach(className => canvas.classList.remove(className));
+        const cursorClass = toolCursorClasses[currentTool];
+        if (cursorClass) canvas.classList.add(cursorClass);
+
+        if (isPanning) {
+            canvas.style.cursor = "grabbing";
+        } else if (currentTool === "hand") {
+            canvas.style.cursor = "grab";
+        } else if (currentTool === "select") {
+            canvas.style.cursor = "default";
+        } else {
+            canvas.style.cursor = "";
+        }
     }
 
     // Tool switching
@@ -710,14 +860,7 @@
             currentTool = btn.dataset.tool;
             toolbarButtons.forEach(b => b.classList.toggle("active", b === btn));
 
-            if (currentTool === "hand") {
-                canvas.style.cursor = "grab";
-            } else if (currentTool === "select") {
-                canvas.style.cursor = "default";
-            } else {
-                canvas.style.cursor = "crosshair";
-            }
-
+            updateCanvasCursor();
             updateControlVisibility();
         });
     });
@@ -748,6 +891,28 @@
         }
     });
 
+    fillEnabledInput.addEventListener("change", () => {
+        fillEnabled = fillEnabledInput.checked;
+        fillColorInput.disabled = !fillEnabled;
+        if (isFillableShape(selectedShape)) {
+            selectedShape.fillColor = fillEnabled ? fillColor : null;
+            pushHistory();
+            render();
+        }
+    });
+
+    fillColorInput.addEventListener("input", () => {
+        fillColor = fillColorInput.value || "#ffff00";
+        if (fillEnabled && isFillableShape(selectedShape)) {
+            selectedShape.fillColor = fillColor;
+            render();
+        }
+    });
+
+    fillColorInput.addEventListener("change", () => {
+        if (fillEnabled && isFillableShape(selectedShape)) pushHistory();
+    });
+
     penSizeInput.addEventListener("input", () => {
         const value = parseInt(penSizeInput.value, 10);
         penWidth = Number.isFinite(value) ? value : penWidth;
@@ -764,14 +929,22 @@
         }
     });
 
-    textSizeInput.addEventListener("input", () => {
-        const value = parseInt(textSizeInput.value, 10);
-        textSize = Number.isFinite(value) ? value : textSize;
-
+    function applyTextSize(value) {
+        if (!Number.isFinite(value) || value < 1) return false;
+        textSize = value;
         if (selectedShape && selectedShape.type === "text") {
             selectedShape.fontSize = textSize;
+            if (currentTextEditor?.shape === selectedShape) {
+                positionTextEditor(selectedShape, currentTextEditor.input);
+            }
             render();
         }
+        return true;
+    }
+
+    textSizeInput.addEventListener("input", () => {
+        const value = Number(textSizeInput.value);
+        if (applyTextSize(value)) textSizeValueInput.value = value.toString();
     });
 
     textSizeInput.addEventListener("change", () => {
@@ -780,11 +953,50 @@
         }
     });
 
+    textSizeValueInput.addEventListener("input", () => {
+        const value = Number(textSizeValueInput.value);
+        if (applyTextSize(value)) {
+            textSizeInput.value = Math.min(72, Math.max(1, value)).toString();
+        }
+    });
+
+    textSizeValueInput.addEventListener("change", () => {
+        const value = Number(textSizeValueInput.value);
+        if (!applyTextSize(value)) {
+            textSizeValueInput.value = textSize.toString();
+            return;
+        }
+        if (selectedShape && selectedShape.type === "text") pushHistory();
+    });
+
     // Initialize controls
     penColorInput.value = penColor;
+    fillEnabledInput.checked = fillEnabled;
+    fillColorInput.value = fillColor;
     penSizeInput.value = penWidth.toString();
     textSizeInput.value = textSize.toString();
+    textSizeValueInput.value = textSize.toString();
     updateControlVisibility();
+
+    sendToBackButton.addEventListener("click", () => {
+        const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
+        if (selectedIndex <= 0) return;
+        shapes.splice(selectedIndex, 1);
+        shapes.unshift(selectedShape);
+        pushHistory();
+        updateLayerVisibility();
+        render();
+    });
+
+    bringToFrontButton.addEventListener("click", () => {
+        const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
+        if (selectedIndex === -1 || selectedIndex >= shapes.length - 1) return;
+        shapes.splice(selectedIndex, 1);
+        shapes.push(selectedShape);
+        pushHistory();
+        updateLayerVisibility();
+        render();
+    });
 
     // Clear, undo, redo
     clearButton.addEventListener("click", () => {
@@ -866,7 +1078,7 @@
 
     // Export PNG
     exportPngButton.addEventListener("click", () => {
-        destroyTextEditor();
+        commitCurrentTextEditor();
         const dataUrl = canvas.toDataURL("image/png");
         const link = document.createElement("a");
         link.href = dataUrl;
@@ -1219,7 +1431,7 @@
     }
 
     async function saveNamedDrawing() {
-        destroyTextEditor();
+        commitCurrentTextEditor();
         const name = saveNameInput.value.trim();
         if (!name) {
             saveNameInput.focus();
@@ -1327,15 +1539,11 @@
     }
 
     function hitTestText(shape, x, y, radiusWorld) {
-        ctx.save();
-        ctx.font = `${shape.fontSize}px sans-serif`;
-        const width = ctx.measureText(shape.text).width;
-        ctx.restore();
-        const height = shape.fontSize;
+        const metrics = measureTextBlock(shape.text, shape.fontSize);
         const left = shape.x;
         const top = shape.y;
-        const right = shape.x + width;
-        const bottom = shape.y + height;
+        const right = shape.x + metrics.width;
+        const bottom = shape.y + metrics.height;
 
         return x >= left - radiusWorld && x <= right + radiusWorld &&
             y >= top - radiusWorld && y <= bottom + radiusWorld;
@@ -1560,7 +1768,7 @@
         isPanning = true;
         panStartScreen = { x: screenX, y: screenY };
         panStartCamera = { x: camera.x, y: camera.y };
-        canvas.style.cursor = "grabbing";
+        updateCanvasCursor();
     }
 
     // Start a resize interaction for a transformable shape and remember original bounds.
@@ -1636,7 +1844,7 @@
     function switchToSelectTool() {
         currentTool = "select";
         toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
-        canvas.style.cursor = "default";
+        updateCanvasCursor();
         updateControlVisibility();
     }
 
@@ -1653,7 +1861,7 @@
                 height: 0,
                 rotation: 0,
                 strokeColor: penColor,
-                fillColor: null,
+                fillColor: fillEnabled ? fillColor : null,
                 strokeWidth: penWidth,
             };
         } else if (tool === "circle") {
@@ -1665,7 +1873,7 @@
                 ry: 0,
                 rotation: 0,
                 strokeColor: penColor,
-                fillColor: null,
+                fillColor: fillEnabled ? fillColor : null,
                 strokeWidth: penWidth,
             };
         } else {
@@ -1761,22 +1969,19 @@
             updateControlVisibility();
             render();
         } else if (currentTool === "text") {
-            const text = prompt("Enter text:");
-            if (text && text.trim() !== "") {
-                const shape = {
-                    type: "text",
-                    x: world.x,
-                    y: world.y,
-                    text: text.trim(),
-                    fontSize: textSize,
-                    color: penColor,
-                };
-                shapes.push(shape);
-                selectedShape = shape;
-                pushHistory();
-                updateControlVisibility();
-                render();
-            }
+            const shape = {
+                type: "text",
+                x: world.x,
+                y: world.y,
+                text: "",
+                fontSize: textSize,
+                color: penColor,
+            };
+            shapes.push(shape);
+            selectedShape = shape;
+            updateControlVisibility();
+            render();
+            showTextEditor(shape, true);
         } else if (isShapeDrawingTool(currentTool)) {
             beginShapeDrawing(currentTool, world);
          } else if (currentTool === "hand") {
@@ -1958,18 +2163,12 @@
         resizeChanged = false;
         rotateChanged = false;
 
-        if (currentTool === "hand") {
-            canvas.style.cursor = "grab";
-        } else if (currentTool === "select") {
-            canvas.style.cursor = "default";
-        } else {
-            canvas.style.cursor = "crosshair";
-        }
+        updateCanvasCursor();
     }
 
     // Mouse handling
     canvas.addEventListener("mousedown", (e) => {
-        destroyTextEditor();
+        commitCurrentTextEditor();
 
         // Middle mouse: always pan
         if (e.button === 1) {
@@ -2033,7 +2232,7 @@
     // Touch handling (mobile)
     canvas.addEventListener("touchstart", (e) => {
         e.preventDefault();
-        destroyTextEditor();
+        commitCurrentTextEditor();
 
         const touches = e.touches;
         if (touches.length === 2) {
