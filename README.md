@@ -13,12 +13,47 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Undo/Redo history
 - Export as PNG image or JSON data
 - Local saves stored in your browser via `localStorage`
+- Installable as an app (PWA) and fully usable offline
 
 ## How to Run
 1. Clone or copy this folder to your machine.
 2. Open `index.html` directly in a browser.
 
-No server or installation is required.
+No build step or installation is required.
+
+To exercise the offline/install behaviour you need an HTTP origin, because
+service workers do not run on `file://` URLs. Any static server works:
+
+```
+python -m http.server 8765
+```
+
+then open `http://localhost:8765/`.
+
+## Install as an App
+- On desktop Chrome/Edge, click **Install** in the toolbar (it appears once the
+  browser offers the prompt), or use the install icon in the address bar.
+- On iOS Safari, use **Share → Add to Home Screen**.
+- Once installed, the app opens in its own window and works with no network.
+
+After the first visit, a service worker (`sw.js`) caches the app shell — the
+page, cursors, and icons — so it loads offline. Drawings live in the browser's
+own storage, so they are available offline too.
+
+### Releasing an update
+`index.html` is fetched network-first, so an online reload always picks up a new
+build. When a new service worker is waiting, an **Update** button appears in the
+toolbar; clicking it activates the new version and reloads. Bump
+`CACHE_VERSION` in `sw.js` whenever a precached asset changes, so stale copies
+of the cursors or icons are dropped.
+
+### Icons
+`icon-*.png` are generated from `favicon.png` by `tools/make-icons.py` (pure
+standard library, no dependencies). Regenerate them after changing the favicon:
+
+```
+python tools/make-icons.py
+```
 
 ## Basic Usage
 - **Draw:** Select **Pen**, click and drag on the canvas.

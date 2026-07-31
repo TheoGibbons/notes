@@ -6,7 +6,17 @@
     <link rel="icon" type="image/png" href="favicon.png" />
     <!-- Prevent page zoom; we handle zoom ourselves on the canvas -->
     <meta name="viewport"
-          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+
+    <!-- Installable app (PWA) -->
+    <link rel="manifest" href="manifest.json" />
+    <meta name="description" content="An in-browser drawing pad with pen, shapes, text and images. Works offline; drawings are saved on your device." />
+    <meta name="theme-color" content="#fafafa" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Drawing Pad" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
     <style>
         * { box-sizing: border-box; }
         html, body {
@@ -69,6 +79,21 @@
             background: #f5f5f5;
             color: #888;
             cursor: default;
+        }
+        /* PWA controls: only revealed when the browser offers an install
+           prompt, or when a new version is waiting to activate. */
+        #install-app,
+        #update-app {
+            display: none;
+        }
+        #install-app.available,
+        #update-app.available {
+            display: inline-block;
+        }
+        #update-app.available {
+            background: #28a745;
+            border-color: #28a745;
+            color: #fff;
         }
         #load-local.save-success {
             outline: 15px solid rgb(40 167 69 / 50%);
@@ -224,6 +249,8 @@
 
     <div class="spacer"></div>
 
+    <button id="update-app" title="A new version is ready — reload to use it">Update</button>
+    <button id="install-app" title="Install this app on your device">Install</button>
     <button id="clear">Clear</button>
 </div>
 
@@ -2426,6 +2453,83 @@
     // Initial history snapshot
     pushHistory();
     render();
+</script>
+
+<script>
+    // ---- PWA: offline support and install prompt -------------------------
+    (function () {
+        const installButton = document.getElementById("install-app");
+        const updateButton = document.getElementById("update-app");
+
+        // Offer the browser's install prompt from our own toolbar button.
+        let deferredInstallPrompt = null;
+
+        window.addEventListener("beforeinstallprompt", e => {
+            e.preventDefault();
+            deferredInstallPrompt = e;
+            installButton.classList.add("available");
+        });
+
+        installButton.addEventListener("click", async () => {
+            if (!deferredInstallPrompt) return;
+            installButton.classList.remove("available");
+            const prompt = deferredInstallPrompt;
+            deferredInstallPrompt = null;
+            prompt.prompt();
+            await prompt.userChoice;
+        });
+
+        window.addEventListener("appinstalled", () => {
+            deferredInstallPrompt = null;
+            installButton.classList.remove("available");
+        });
+
+        // Service worker: needs a real origin, so skip it on file:// URLs.
+        if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
+
+        window.addEventListener("load", async () => {
+            let registration;
+            try {
+                registration = await navigator.serviceWorker.register("sw.js");
+            } catch (err) {
+                console.warn("Service worker registration failed:", err);
+                return;
+            }
+
+            const offerUpdate = worker => {
+                if (!worker) return;
+                updateButton.classList.add("available");
+                updateButton.onclick = () => {
+                    updateButton.classList.remove("available");
+                    worker.postMessage({ type: "SKIP_WAITING" });
+                };
+            };
+
+            // A new worker may already be waiting from a previous visit.
+            if (registration.waiting && navigator.serviceWorker.controller) {
+                offerUpdate(registration.waiting);
+            }
+
+            registration.addEventListener("updatefound", () => {
+                const installing = registration.installing;
+                if (!installing) return;
+                installing.addEventListener("statechange", () => {
+                    // A worker reaching "installed" while one is already in
+                    // control means this is an update, not a first install.
+                    if (installing.state === "installed" && navigator.serviceWorker.controller) {
+                        offerUpdate(installing);
+                    }
+                });
+            });
+
+            let reloading = false;
+            navigator.serviceWorker.addEventListener("controllerchange", () => {
+                if (reloading) return;
+                reloading = true;
+                location.reload();
+            });
+        });
+    })();
 </script>
 </body>
 </html>
