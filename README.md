@@ -8,7 +8,7 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 
 ## Features
 - Pen, Text, Eraser, Select/Move, and Hand/Pan tools
-- Adjustable pen size, text size, and color
+- Adjustable stroke size (pen, rectangle, circle, arrow), text size, and color
 - Zoom with the mouse wheel and pan with the Hand tool or middle mouse button
 - Undo/Redo history
 - Export as PNG image or JSON data
@@ -57,7 +57,7 @@ python tools/make-icons.py
 
 ## Basic Usage
 - **Draw:** Select **Pen**, click and drag on the canvas.
-- **Change color/size:** Use the toolbar controls for color and pen size.
+- **Change color/size:** Use the toolbar controls for color and size.
 - **Add text:** Select **Text**, click on the canvas, and enter your text.
 - **Edit/move:** Use **Select/Move** to pick and drag existing strokes or text.
 - **Pan/zoom:** Use **Hand/Pan** or middle mouse to pan, and the mouse wheel to zoom.

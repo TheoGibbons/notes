@@ -210,7 +210,7 @@
     </div>
 
     <div id="pen-size-container" class="inline-group">
-        <label class="group-label" for="pen-size">Pen size:</label>
+        <label class="group-label" for="pen-size">Size:</label>
         <input type="range" id="pen-size" min="1" max="20" value="2" />
     </div>
 
@@ -793,9 +793,15 @@
 
     // UI: visibility helpers
     function updatePenSizeVisibility() {
-        const hasSelectedStroke = selectedShape && selectedShape.type === "stroke";
+        const isSizedDrawingTool = currentTool === "pen" || currentTool === "rect" ||
+            currentTool === "circle" || currentTool === "arrow";
+        const widthProperty = getShapeWidthProperty(selectedShape);
+        if (currentTool === "select" && widthProperty) {
+            penWidth = selectedShape[widthProperty];
+            penSizeInput.value = Math.min(20, Math.max(1, penWidth)).toString();
+        }
         penSizeContainer.style.display =
-            currentTool === "pen" || hasSelectedStroke ? "inline-flex" : "none";
+            isSizedDrawingTool || widthProperty ? "inline-flex" : "none";
     }
 
     function updateTextSizeVisibility() {
@@ -902,6 +908,15 @@
         return null;
     }
 
+    function getShapeWidthProperty(shape) {
+        if (!shape) return null;
+        if (shape.type === "stroke") return "width";
+        if (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow") {
+            return "strokeWidth";
+        }
+        return null;
+    }
+
     penColorInput.addEventListener("input", () => {
         penColor = penColorInput.value || "#000000";
 
@@ -944,14 +959,15 @@
         const value = parseInt(penSizeInput.value, 10);
         penWidth = Number.isFinite(value) ? value : penWidth;
 
-        if (selectedShape && selectedShape.type === "stroke") {
-            selectedShape.width = penWidth;
+        const widthProperty = getShapeWidthProperty(selectedShape);
+        if (widthProperty) {
+            selectedShape[widthProperty] = penWidth;
             render();
         }
     });
 
     penSizeInput.addEventListener("change", () => {
-        if (selectedShape && selectedShape.type === "stroke") {
+        if (getShapeWidthProperty(selectedShape)) {
             pushHistory();
         }
     });
