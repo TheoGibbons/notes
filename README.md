@@ -8,6 +8,7 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 
 ## Features
 - Pen, Text, Eraser, Select/Move, and Hand/Pan tools
+- Insert images and crop them non-destructively
 - Adjustable stroke size (pen, rectangle, circle, arrow), text size, and color
 - Zoom with the mouse wheel and pan with the Hand tool or middle mouse button
 - Undo/Redo history
@@ -64,6 +65,13 @@ python tools/make-icons.py
 - **Fit to view:** Press `Space` to zoom and pan so everything you have drawn fits
   on screen (ignored while the Text tool is active or you are editing text).
 - **Undo/Redo:** Use the toolbar buttons or `Ctrl+Z` / `Ctrl+Y`.
+- **Crop an image:** Select an image and click **Crop** (or double-click the
+  image). Drag the corner and edge handles to set the crop window, or drag
+  inside it to slide the window over the picture. **Apply** (or `Enter`, or a
+  click outside) keeps the crop, **Cancel** (or `Esc`) discards it, and
+  **Reset** brings the whole picture back. Cropping never discards pixels, so
+  cropping again — even after moving, resizing, or rotating the image — starts
+  from the full original.
 - **Export PNG:** Click **PNG** under Export or press `Ctrl+S` (`Cmd+S` on macOS).
 - **Clear:** Click **Clear** to wipe the canvas.
 

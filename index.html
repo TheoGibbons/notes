@@ -95,6 +95,14 @@
             border-color: #28a745;
             color: #fff;
         }
+        /* Save names (and their timestamps) can be long — keep the dropdown
+           from stretching the toolbar, and let the title show the full text. */
+        #load-local {
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         #load-local.save-success {
             outline: 15px solid rgb(40 167 69 / 50%);
             outline-offset: 1px;
@@ -124,10 +132,16 @@
         #color-container,
         #fill-container,
         #layer-container,
+        #crop-container,
         #text-size-container {
             display: none;
             align-items: center;
             gap: 4px;
+        }
+        #crop-apply {
+            background: #007bff;
+            border-color: #007bff;
+            color: #fff;
         }
         #canvas {
             flex: 1;
@@ -226,6 +240,14 @@
         <button id="bring-to-front" title="Bring selected item in front of everything">Bring to Front</button>
     </div>
 
+    <div id="crop-container" class="inline-group">
+        <span class="group-label">Image:</span>
+        <button id="crop-image" title="Crop the selected image (or double-click it)">Crop</button>
+        <button id="crop-apply" title="Apply crop (Enter)">Apply</button>
+        <button id="crop-reset" title="Restore the whole image">Reset</button>
+        <button id="crop-cancel" title="Cancel crop (Esc)">Cancel</button>
+    </div>
+
     <div class="divider"></div>
 
     <span class="group-label">History:</span>
@@ -292,6 +314,12 @@
     const sendToBackButton = document.getElementById("send-to-back");
     const bringToFrontButton = document.getElementById("bring-to-front");
 
+    const cropContainer = document.getElementById("crop-container");
+    const cropButton = document.getElementById("crop-image");
+    const cropApplyButton = document.getElementById("crop-apply");
+    const cropResetButton = document.getElementById("crop-reset");
+    const cropCancelButton = document.getElementById("crop-cancel");
+
     const STORAGE_KEY = "drawingPad_saves_v1";
     const SAVE_DB_NAME = "drawingPadDatabase";
     const SAVE_STORE_NAME = "saves";
@@ -307,7 +335,9 @@
     // rect:   { type: 'rect', x, y, width, height, rotation, strokeColor, fillColor, strokeWidth }
     // circle: { type: 'circle', x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth }
     // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth }
-    // image:  { type: 'image', x, y, width, height, rotation, src }
+    // image:  { type: 'image', x, y, width, height, rotation, src, crop? }
+    //         crop is the visible part of the source image as fractions of it:
+    //         { x, y, width, height } in 0..1, omitted when the whole image shows.
     let shapes = [];
     let cleanShapesSnapshot = JSON.stringify(shapes);
     let isDirty = false;
@@ -341,6 +371,8 @@
     }
 
     function restoreHistory(index) {
+        // The session points at a shape that is about to be replaced.
+        cancelImageCrop();
         shapes = JSON.parse(history[index] || "[]");
         selectedShape = null;
         historyIndex = index;
@@ -371,6 +403,17 @@
     let drawingStartWorld = null;
 
     let selectedShape = null;
+
+    // Image cropping. While a session is active the shape itself is untouched;
+    // `rect` is the pending crop window and only Apply writes it back.
+    // { shape, origin: {x,y,rotation}, full, rect, initialRect }
+    // `full`/`rect`/`initialRect` are { left, top, right, bottom } boxes in the
+    // shape's local (rotated, world-scaled) space, centred on `origin`.
+    let cropSession = null;
+    let cropDragHandle = null;   // 'tl','t','tr','r','br','b','bl','l','move'
+    let cropDragStartLocal = null;
+    let cropDragStartRect = null;
+
     let dragStartWorld = null;
     let originalShapeData = null;
     let originalBounds = null; // for resize: { x, y, width, height, radius, rotation }
@@ -527,6 +570,10 @@
         const scale = camera.scale || 1;
 
         for (const s of shapes) {
+            // The image being cropped is drawn by the crop overlay instead, so
+            // the dimmed area outside the crop window reads consistently.
+            if (cropSession && s === cropSession.shape) continue;
+
             if (s.type === "stroke") {
                 drawStroke(s, scale);
             } else if (s.type === "text") {
@@ -542,7 +589,9 @@
             }
         }
 
-        if (selectedShape) {
+        if (cropSession) {
+            drawCropOverlay();
+        } else if (selectedShape) {
             drawSelectionOutline(selectedShape, scale);
         }
     }
@@ -645,21 +694,69 @@
         });
     }
 
-    function drawImageShape(shape, scale) {
-        const { x, y, width, height, rotation, src } = shape;
-        const cached = imageCache.get(src);
+    // Smallest crop we allow, as a fraction of the source image, so the source
+    // rectangle handed to drawImage can never collapse to zero.
+    const MIN_CROP_FRACTION = 1e-4;
+    const FULL_CROP = Object.freeze({ x: 0, y: 0, width: 1, height: 1 });
+
+    // Clamp a stored crop into a usable window, or return null when it is
+    // missing, unusable, or simply covers the whole image.
+    function sanitizeCrop(crop) {
+        if (!crop || typeof crop !== "object") return null;
+        const number = (value, fallback) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? n : fallback;
+        };
+        const limit = 1 - MIN_CROP_FRACTION;
+        const x = Math.min(limit, Math.max(0, number(crop.x, 0)));
+        const y = Math.min(limit, Math.max(0, number(crop.y, 0)));
+        const width = Math.min(1 - x, Math.max(MIN_CROP_FRACTION, number(crop.width, 1 - x)));
+        const height = Math.min(1 - y, Math.max(MIN_CROP_FRACTION, number(crop.height, 1 - y)));
+
+        const epsilon = 1e-6;
+        const coversEverything = x <= epsilon && y <= epsilon &&
+            width >= 1 - epsilon && height >= 1 - epsilon;
+        return coversEverything ? null : { x, y, width, height };
+    }
+
+    function getImageCrop(shape) {
+        return sanitizeCrop(shape?.crop) || FULL_CROP;
+    }
+
+    function getLoadedImage(shape) {
+        const cached = imageCache.get(shape.src);
         if (!cached) {
-            loadImageSource(src, render);
-            return;
+            loadImageSource(shape.src, render);
+            return null;
         }
-        if (!cached.loaded || !cached.img) return;
-        const img = cached.img;
+        return cached.loaded ? cached.img : null;
+    }
+
+    // Draw the part of `img` selected by a crop (fractions of the source) into
+    // the destination box given in the current transform's units.
+    function drawCroppedImage(img, crop, dx, dy, dw, dh) {
+        const naturalWidth = img.naturalWidth || 0;
+        const naturalHeight = img.naturalHeight || 0;
+        if (naturalWidth <= 0 || naturalHeight <= 0) return;
+        ctx.drawImage(
+            img,
+            crop.x * naturalWidth, crop.y * naturalHeight,
+            crop.width * naturalWidth, crop.height * naturalHeight,
+            dx, dy, dw, dh
+        );
+    }
+
+    function drawImageShape(shape, scale) {
+        const { x, y, width, height, rotation } = shape;
+        const img = getLoadedImage(shape);
+        if (!img) return;
 
         ctx.save();
         ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
         ctx.rotate(rotation);
 
-        ctx.drawImage(img, -width / 2 * scale, -height / 2 * scale, width * scale, height * scale);
+        drawCroppedImage(img, getImageCrop(shape),
+            -width / 2 * scale, -height / 2 * scale, width * scale, height * scale);
 
         ctx.restore();
     }
@@ -772,6 +869,272 @@
         ctx.restore();
     }
 
+    // --- Image cropping ---------------------------------------------------
+    // A crop session works in the image's local space: the origin is the image
+    // centre as it was when cropping started and the axes follow the image's
+    // own rotation. `full` is where the entire source image sits in that space
+    // and `rect` is the pending crop window inside it.
+
+    const CROP_HANDLE_SCREEN_SIZE = 9;   // drawn side length, in screen px
+    const CROP_HANDLE_HIT_RADIUS = 12;   // grab radius, in screen px
+
+    function getCropFrame(session) {
+        return {
+            x: session.origin.x,
+            y: session.origin.y,
+            rotation: session.origin.rotation,
+        };
+    }
+
+    function cropRectsMatch(a, b) {
+        const epsilon = 1e-6;
+        return Math.abs(a.left - b.left) < epsilon && Math.abs(a.top - b.top) < epsilon &&
+            Math.abs(a.right - b.right) < epsilon && Math.abs(a.bottom - b.bottom) < epsilon;
+    }
+
+    function beginImageCrop(shape) {
+        if (!shape || shape.type !== "image") return;
+        commitCurrentTextEditor();
+        if (cropSession) applyImageCrop();
+
+        const crop = getImageCrop(shape);
+        const width = shape.width || 0;
+        const height = shape.height || 0;
+        const left = -width / 2;
+        const top = -height / 2;
+
+        // Undo the crop to find where the whole source image would sit.
+        const fullWidth = width / crop.width;
+        const fullHeight = height / crop.height;
+        const fullLeft = left - crop.x * fullWidth;
+        const fullTop = top - crop.y * fullHeight;
+
+        const rect = { left, top, right: left + width, bottom: top + height };
+        cropSession = {
+            shape,
+            origin: { x: shape.x, y: shape.y, rotation: shape.rotation || 0 },
+            full: {
+                left: fullLeft,
+                top: fullTop,
+                right: fullLeft + fullWidth,
+                bottom: fullTop + fullHeight,
+            },
+            rect,
+            initialRect: { ...rect },
+        };
+
+        selectedShape = shape;
+        switchToSelectTool();
+        updateControlVisibility();
+        updateCanvasCursor();
+        render();
+    }
+
+    function endCropSession() {
+        cropSession = null;
+        cropDragHandle = null;
+        cropDragStartLocal = null;
+        cropDragStartRect = null;
+        updateControlVisibility();
+        updateCanvasCursor();
+    }
+
+    function cancelImageCrop() {
+        if (!cropSession) return;
+        endCropSession();
+        render();
+    }
+
+    function applyImageCrop() {
+        if (!cropSession) return;
+        const { shape, full, rect, initialRect } = cropSession;
+        const changed = !cropRectsMatch(rect, initialRect);
+
+        if (changed) {
+            const fullWidth = full.right - full.left;
+            const fullHeight = full.bottom - full.top;
+            const centre = localToWorldForBounds(
+                getCropFrame(cropSession),
+                (rect.left + rect.right) / 2,
+                (rect.top + rect.bottom) / 2
+            );
+
+            shape.x = centre.x;
+            shape.y = centre.y;
+            shape.width = rect.right - rect.left;
+            shape.height = rect.bottom - rect.top;
+
+            // Crop fractions are absolute against the source image, so they can
+            // be recomputed from the full rect regardless of earlier crops.
+            const crop = sanitizeCrop({
+                x: (rect.left - full.left) / fullWidth,
+                y: (rect.top - full.top) / fullHeight,
+                width: shape.width / fullWidth,
+                height: shape.height / fullHeight,
+            });
+            if (crop) shape.crop = crop;
+            else delete shape.crop;
+        }
+
+        endCropSession();
+        if (changed) pushHistory();
+        render();
+    }
+
+    function resetImageCrop() {
+        if (!cropSession) return;
+        cropSession.rect = { ...cropSession.full };
+        render();
+    }
+
+    function getCropHandlePositions(rect) {
+        const midX = (rect.left + rect.right) / 2;
+        const midY = (rect.top + rect.bottom) / 2;
+        return [
+            { id: "tl", x: rect.left, y: rect.top },
+            { id: "t", x: midX, y: rect.top },
+            { id: "tr", x: rect.right, y: rect.top },
+            { id: "r", x: rect.right, y: midY },
+            { id: "br", x: rect.right, y: rect.bottom },
+            { id: "b", x: midX, y: rect.bottom },
+            { id: "bl", x: rect.left, y: rect.bottom },
+            { id: "l", x: rect.left, y: midY },
+        ];
+    }
+
+    function getCropHandleAtWorld(world) {
+        if (!cropSession) return null;
+        const local = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
+        const hitRadius = CROP_HANDLE_HIT_RADIUS / (camera.scale || 1);
+
+        for (const handle of getCropHandlePositions(cropSession.rect)) {
+            if (Math.hypot(local.x - handle.x, local.y - handle.y) <= hitRadius) {
+                return handle.id;
+            }
+        }
+
+        const { rect } = cropSession;
+        const isInside = local.x >= rect.left && local.x <= rect.right &&
+            local.y >= rect.top && local.y <= rect.bottom;
+        return isInside ? "move" : null;
+    }
+
+    function beginCropDrag(handle, world) {
+        cropDragHandle = handle;
+        cropDragStartLocal = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
+        cropDragStartRect = { ...cropSession.rect };
+    }
+
+    function updateCropDrag(world) {
+        if (!cropSession || !cropDragHandle) return;
+
+        const local = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
+        const dx = local.x - cropDragStartLocal.x;
+        const dy = local.y - cropDragStartLocal.y;
+        const start = cropDragStartRect;
+        const full = cropSession.full;
+        const minSize = Math.min(
+            20 / (camera.scale || 1),
+            (full.right - full.left) / 2,
+            (full.bottom - full.top) / 2
+        );
+        const next = { ...start };
+
+        if (cropDragHandle === "move") {
+            const width = start.right - start.left;
+            const height = start.bottom - start.top;
+            next.left = Math.min(full.right - width, Math.max(full.left, start.left + dx));
+            next.top = Math.min(full.bottom - height, Math.max(full.top, start.top + dy));
+            next.right = next.left + width;
+            next.bottom = next.top + height;
+        } else {
+            // Handle ids name the edges they move: "tl" moves top and left, and
+            // so on. Each edge stops at the source image and at the minimum size.
+            if (cropDragHandle.includes("l")) {
+                next.left = Math.min(start.right - minSize, Math.max(full.left, start.left + dx));
+            }
+            if (cropDragHandle.includes("r")) {
+                next.right = Math.max(start.left + minSize, Math.min(full.right, start.right + dx));
+            }
+            if (cropDragHandle.includes("t")) {
+                next.top = Math.min(start.bottom - minSize, Math.max(full.top, start.top + dy));
+            }
+            if (cropDragHandle.includes("b")) {
+                next.bottom = Math.max(start.top + minSize, Math.min(full.bottom, start.bottom + dy));
+            }
+        }
+
+        cropSession.rect = next;
+        render();
+    }
+
+    function drawCropOverlay() {
+        const session = cropSession;
+        const { shape, full, rect } = session;
+        const scale = camera.scale || 1;
+        const img = getLoadedImage(shape);
+
+        ctx.save();
+        ctx.translate((session.origin.x - camera.x) * scale, (session.origin.y - camera.y) * scale);
+        ctx.rotate(session.origin.rotation);
+        ctx.scale(scale, scale); // draw in local units from here on
+
+        const fullWidth = full.right - full.left;
+        const fullHeight = full.bottom - full.top;
+        const rectWidth = rect.right - rect.left;
+        const rectHeight = rect.bottom - rect.top;
+
+        if (img) {
+            // Whole source image dimmed, then the crop window at full strength.
+            ctx.globalAlpha = 0.3;
+            drawCroppedImage(img, FULL_CROP, full.left, full.top, fullWidth, fullHeight);
+            ctx.globalAlpha = 1;
+            drawCroppedImage(img, {
+                x: (rect.left - full.left) / fullWidth,
+                y: (rect.top - full.top) / fullHeight,
+                width: rectWidth / fullWidth,
+                height: rectHeight / fullHeight,
+            }, rect.left, rect.top, rectWidth, rectHeight);
+        }
+
+        const pixel = 1 / scale; // one screen pixel, in local units
+        ctx.strokeStyle = "#007bff";
+        ctx.lineWidth = pixel;
+        ctx.setLineDash([4 * pixel, 4 * pixel]);
+        ctx.strokeRect(full.left, full.top, fullWidth, fullHeight);
+
+        ctx.setLineDash([]);
+        ctx.lineWidth = 2 * pixel;
+        ctx.strokeRect(rect.left, rect.top, rectWidth, rectHeight);
+
+        // Rule-of-thirds guides inside the crop window
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+        ctx.lineWidth = pixel;
+        ctx.beginPath();
+        for (let i = 1; i <= 2; i++) {
+            const guideX = rect.left + rectWidth * (i / 3);
+            const guideY = rect.top + rectHeight * (i / 3);
+            ctx.moveTo(guideX, rect.top);
+            ctx.lineTo(guideX, rect.bottom);
+            ctx.moveTo(rect.left, guideY);
+            ctx.lineTo(rect.right, guideY);
+        }
+        ctx.stroke();
+
+        const handleSize = CROP_HANDLE_SCREEN_SIZE / scale;
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = "#007bff";
+        ctx.lineWidth = pixel;
+        getCropHandlePositions(rect).forEach(handle => {
+            ctx.beginPath();
+            ctx.rect(handle.x - handleSize / 2, handle.y - handleSize / 2, handleSize, handleSize);
+            ctx.fill();
+            ctx.stroke();
+        });
+
+        ctx.restore();
+    }
+
     // Local saves
     let saves = {};
     let saveSuccessTimeout = null;
@@ -852,12 +1215,23 @@
         bringToFrontButton.disabled = selectedIndex === -1 || selectedIndex >= shapes.length - 1;
     }
 
+    function updateCropVisibility() {
+        const isCropping = !!cropSession;
+        const hasImageSelected = !!selectedShape && selectedShape.type === "image";
+        cropContainer.style.display = isCropping || hasImageSelected ? "inline-flex" : "none";
+        cropButton.style.display = isCropping ? "none" : "inline-block";
+        [cropApplyButton, cropResetButton, cropCancelButton].forEach(button => {
+            button.style.display = isCropping ? "inline-block" : "none";
+        });
+    }
+
     function updateControlVisibility() {
         updatePenSizeVisibility();
         updateTextSizeVisibility();
         updateColorVisibility();
         updateFillVisibility();
         updateLayerVisibility();
+        updateCropVisibility();
     }
 
     function isTransformableShape(shape) {
@@ -878,7 +1252,9 @@
         const cursorClass = toolCursorClasses[currentTool];
         if (cursorClass) canvas.classList.add(cursorClass);
 
-        if (isPanning) {
+        if (cropSession) {
+            canvas.style.cursor = "crosshair";
+        } else if (isPanning) {
             canvas.style.cursor = "grabbing";
         } else if (currentTool === "hand") {
             canvas.style.cursor = "grab";
@@ -892,6 +1268,7 @@
     // Tool switching
     toolbarButtons.forEach((btn) => {
         btn.addEventListener("click", () => {
+            applyImageCrop();
             currentTool = btn.dataset.tool;
             toolbarButtons.forEach(b => b.classList.toggle("active", b === btn));
 
@@ -1023,6 +1400,13 @@
     textSizeValueInput.value = textSize.toString();
     updateControlVisibility();
 
+    cropButton.addEventListener("click", () => {
+        if (selectedShape && selectedShape.type === "image") beginImageCrop(selectedShape);
+    });
+    cropApplyButton.addEventListener("click", () => applyImageCrop());
+    cropResetButton.addEventListener("click", () => resetImageCrop());
+    cropCancelButton.addEventListener("click", () => cancelImageCrop());
+
     sendToBackButton.addEventListener("click", () => {
         const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
         if (selectedIndex <= 0) return;
@@ -1045,6 +1429,7 @@
 
     // Clear, undo, redo
     clearButton.addEventListener("click", () => {
+        cancelImageCrop();
         shapes = [];
         selectedShape = null;
         destroyTextEditor();
@@ -1086,15 +1471,23 @@
 
         if (e.key === "Escape") {
             e.preventDefault();
+            if (cropSession) {
+                cancelImageCrop();
+                return;
+            }
             stopAllInteractions(true);
             switchToSelectTool();
             render();
+        } else if (e.key === "Enter" && cropSession && !targetIsEditable) {
+            e.preventDefault();
+            applyImageCrop();
         } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
             e.key.toLowerCase() === "s") {
             e.preventDefault();
             exportPngButton.click();
         } else if (e.key === "Delete" && selectedShape && !targetIsEditable) {
             e.preventDefault();
+            cancelImageCrop();
             const selectedIndex = shapes.indexOf(selectedShape);
             if (selectedIndex !== -1) {
                 shapes.splice(selectedIndex, 1);
@@ -1133,6 +1526,8 @@
     // Export PNG
     exportPngButton.addEventListener("click", () => {
         commitCurrentTextEditor();
+        // Commit any crop first so its overlay is not baked into the export.
+        applyImageCrop();
         const dataUrl = canvas.toDataURL("image/png");
         const link = document.createElement("a");
         link.href = dataUrl;
@@ -1144,6 +1539,7 @@
 
     // Export JSON
     exportJsonButton.addEventListener("click", () => {
+        applyImageCrop();
         const data = JSON.stringify({ shapes, camera }, null, 2);
         const blob = new Blob([data], { type: "application/json" });
         const url = URL.createObjectURL(blob);
@@ -1231,12 +1627,15 @@
                 if (typeof shape.src !== "string" || !shape.src) {
                     throw new Error(`Image shape ${index + 1} has no image data.`);
                 }
-                return {
+                const imageShape = {
                     ...common,
                     width: positive(shape.width, 10),
                     height: positive(shape.height, 10),
                     src: shape.src,
                 };
+                const crop = sanitizeCrop(shape.crop);
+                if (crop) imageShape.crop = crop;
+                return imageShape;
             }
             throw new Error(`Shape ${index + 1} uses unsupported type "${shape.type}".`);
         });
@@ -1262,6 +1661,7 @@
             const imported = normalizeImportedDrawing(JSON.parse(await file.text()));
             if (!await autosaveIfDirty(true)) return;
 
+            cancelImageCrop();
             destroyTextEditor();
             shapes = imported.shapes;
             camera = imported.camera;
@@ -1404,6 +1804,16 @@
             loadLocalSelect.appendChild(opt);
         }
         loadLocalSelect.disabled = names.length === 0;
+        updateSavesDropdownTitle();
+    }
+
+    // The dropdown is clipped to keep the toolbar tidy, so the tooltip carries
+    // the full text of whatever is selected.
+    function updateSavesDropdownTitle() {
+        const selected = loadLocalSelect.selectedOptions[0];
+        loadLocalSelect.title = selected && selected.value
+            ? selected.textContent
+            : "Previous saves";
     }
 
     function isAutosaveName(name) {
@@ -1514,15 +1924,19 @@
         }
     });
 
+    loadLocalSelect.addEventListener("change", updateSavesDropdownTitle);
+
     loadLocalSelect.addEventListener("change", async () => {
         const name = loadLocalSelect.value;
         if (!name || !saves[name]) return;
 
         if (!await autosaveIfDirty(true)) {
             loadLocalSelect.value = "";
+            updateSavesDropdownTitle();
             return;
         }
 
+        cancelImageCrop();
         destroyTextEditor();
         const save = saves[name];
         saveNameInput.value = name;
@@ -2069,6 +2483,15 @@
     }
 
     function handlePrimaryDownAtWorld(world, screenX, screenY) {
+        // While cropping, the canvas belongs to the crop session: drag a handle
+        // or the window itself, and a click anywhere else commits the crop.
+        if (cropSession) {
+            const handle = getCropHandleAtWorld(world);
+            if (handle) beginCropDrag(handle, world);
+            else applyImageCrop();
+            return;
+        }
+
         if (currentTool === "pen") {
             isDrawing = true;
             currentStroke = {
@@ -2143,6 +2566,12 @@
     }
 
     function handlePointerMove(world, screenX, screenY, keepAspectRatio = false) {
+        // Crop drags own the pointer, but middle-mouse panning still works.
+        if (cropSession && !isPanning) {
+            updateCropDrag(world);
+            return;
+        }
+
         if (currentTool === "pen" && isDrawing && currentStroke) {
             currentStroke.points.push(world);
             render();
@@ -2258,6 +2687,18 @@
     }
 
     function stopAllInteractions(cancelDrawing = false) {
+        // A crop drag ends on pointer up, but the session stays open until it
+        // is applied or cancelled.
+        if (cropSession) {
+            cropDragHandle = null;
+            cropDragStartLocal = null;
+            cropDragStartRect = null;
+            isPanning = false;
+            panStartScreen = null;
+            updateCanvasCursor();
+            return;
+        }
+
         if (isShapeDrawingTool(currentTool) && isDrawing && draftShape) {
             const minimumSize = 3 / (camera.scale || 1);
             const isLargeEnough = draftShape.type === "arrow"
@@ -2468,11 +2909,19 @@
         stopAllInteractions();
     }, { passive: false });
 
-    // Double-click to edit text (desktop)
+    // Double-click to edit text or crop an image (desktop)
     canvas.addEventListener("dblclick", (e) => {
+        if (cropSession) return;
+
         const world = screenToWorld(e.clientX, e.clientY);
         const shape = hitTestShapes(world.x, world.y);
-        if (!shape || shape.type !== "text") return;
+        if (!shape) return;
+
+        if (shape.type === "image") {
+            beginImageCrop(shape);
+            return;
+        }
+        if (shape.type !== "text") return;
 
         selectedShape = shape;
         updateControlVisibility();
@@ -2482,6 +2931,7 @@
 
     // --- Image import ---
     insertImageButton.addEventListener("click", () => {
+        applyImageCrop();
         imageFileInput.click();
     });
 
@@ -2511,6 +2961,7 @@
 
     function addImageSource(src) {
         loadImageSource(src, (img) => {
+            applyImageCrop();
             const baseScale = camera.scale || 1;
             const maxDimension = Math.min(canvas.width, canvas.height) / baseScale * 0.5;
             const aspect = img.naturalWidth / img.naturalHeight;
