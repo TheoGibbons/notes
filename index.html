@@ -298,6 +298,8 @@
 
     // World / camera state (with zoom)
     let camera = { x: 0, y: 0, scale: 1 };
+    const MIN_SCALE = 0.2;
+    const MAX_SCALE = 5;
 
     // Shapes
     // stroke: { type: 'stroke', points: [{x,y},...], color, width }
@@ -1097,6 +1099,11 @@
                 updateControlVisibility();
                 render();
             }
+        } else if (e.key === " " && !targetIsEditable && !currentTextEditor &&
+            currentTool !== "text" && !(e.target instanceof HTMLSelectElement) &&
+            !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
+            e.preventDefault();
+            zoomToFitShapes();
         } else if (!targetIsEditable && !e.ctrlKey && !e.metaKey && !e.altKey &&
             !e.repeat && toolHotkeys[e.key.toLowerCase()]) {
             e.preventDefault();
@@ -1753,6 +1760,105 @@
         return null;
     }
 
+    // Axis-aligned world extent of a shape, including rotation and stroke width.
+    function getShapeWorldExtent(shape) {
+        if (shape.type === "stroke") {
+            const points = shape.points || [];
+            if (!points.length) return null;
+            const pad = (shape.width || 0) / 2;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const p of points) {
+                minX = Math.min(minX, p.x);
+                minY = Math.min(minY, p.y);
+                maxX = Math.max(maxX, p.x);
+                maxY = Math.max(maxY, p.y);
+            }
+            return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
+        }
+
+        if (shape.type === "text") {
+            // Text is anchored at its top-left corner and is never rotated.
+            const metrics = measureTextBlock(shape.text, shape.fontSize || 0);
+            return {
+                minX: shape.x,
+                minY: shape.y,
+                maxX: shape.x + metrics.width,
+                maxY: shape.y + metrics.height,
+            };
+        }
+
+        const bounds = getShapeBounds(shape);
+        if (!bounds) return null;
+
+        const rotation = shape.rotation || 0;
+        const cosR = Math.abs(Math.cos(rotation));
+        const sinR = Math.abs(Math.sin(rotation));
+        const halfBoxW = bounds.width / 2;
+        const halfBoxH = bounds.height / 2;
+
+        let halfW;
+        let halfH;
+        if (shape.type === "circle") {
+            halfW = Math.hypot(halfBoxW * cosR, halfBoxH * sinR);
+            halfH = Math.hypot(halfBoxW * sinR, halfBoxH * cosR);
+        } else {
+            halfW = halfBoxW * cosR + halfBoxH * sinR;
+            halfH = halfBoxW * sinR + halfBoxH * cosR;
+        }
+
+        const pad = (shape.strokeWidth || 0) / 2;
+        return {
+            minX: bounds.x - halfW - pad,
+            minY: bounds.y - halfH - pad,
+            maxX: bounds.x + halfW + pad,
+            maxY: bounds.y + halfH + pad,
+        };
+    }
+
+    function getShapesWorldExtent() {
+        let extent = null;
+        for (const shape of shapes) {
+            const shapeExtent = getShapeWorldExtent(shape);
+            if (!shapeExtent) continue;
+            if (![shapeExtent.minX, shapeExtent.minY, shapeExtent.maxX, shapeExtent.maxY]
+                .every(Number.isFinite)) continue;
+            if (!extent) {
+                extent = shapeExtent;
+                continue;
+            }
+            extent.minX = Math.min(extent.minX, shapeExtent.minX);
+            extent.minY = Math.min(extent.minY, shapeExtent.minY);
+            extent.maxX = Math.max(extent.maxX, shapeExtent.maxX);
+            extent.maxY = Math.max(extent.maxY, shapeExtent.maxY);
+        }
+        return extent;
+    }
+
+    // Zoom and pan so every placed shape is visible with a small margin.
+    function zoomToFitShapes() {
+        const extent = getShapesWorldExtent();
+        if (!extent) return; // nothing placed – leave the camera alone
+
+        const viewWidth = canvas.width;
+        const viewHeight = canvas.height;
+        if (viewWidth <= 0 || viewHeight <= 0) return;
+
+        const margin = Math.min(40, viewWidth / 4, viewHeight / 4); // screen px
+        const contentWidth = Math.max(extent.maxX - extent.minX, 1e-6);
+        const contentHeight = Math.max(extent.maxY - extent.minY, 1e-6);
+
+        const fitScale = Math.min(
+            (viewWidth - margin * 2) / contentWidth,
+            (viewHeight - margin * 2) / contentHeight,
+        );
+        const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, fitScale));
+
+        camera.scale = scale;
+        camera.x = (extent.minX + extent.maxX) / 2 - viewWidth / (2 * scale);
+        camera.y = (extent.minY + extent.maxY) / 2 - viewHeight / (2 * scale);
+        render();
+    }
+
     // Return world-space coordinates of the rotation handle center and a radius
     // in world units that matches the drawn blue circle in screen space.
     function getRotationHandleWorld(shape) {
@@ -2251,8 +2357,6 @@
         const delta = e.deltaY < 0 ? 1 : -1;
         let newScale = delta > 0 ? scale * zoomFactor : scale / zoomFactor;
 
-        const MIN_SCALE = 0.2;
-        const MAX_SCALE = 5;
         newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
         camera.scale = newScale;
 
@@ -2320,8 +2424,6 @@
             if (pinchStartDistance <= 0) return;
 
             let newScale = pinchStartScale * (currentDistance / pinchStartDistance);
-            const MIN_SCALE = 0.2;
-            const MAX_SCALE = 5;
             newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
             camera.scale = newScale;
 

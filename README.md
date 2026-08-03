@@ -61,6 +61,8 @@ python tools/make-icons.py
 - **Add text:** Select **Text**, click on the canvas, and enter your text.
 - **Edit/move:** Use **Select/Move** to pick and drag existing strokes or text.
 - **Pan/zoom:** Use **Hand/Pan** or middle mouse to pan, and the mouse wheel to zoom.
+- **Fit to view:** Press `Space` to zoom and pan so everything you have drawn fits
+  on screen (ignored while the Text tool is active or you are editing text).
 - **Undo/Redo:** Use the toolbar buttons or `Ctrl+Z` / `Ctrl+Y`.
 - **Clear:** Click **Clear** to wipe the canvas.
 
