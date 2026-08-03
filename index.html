@@ -1089,6 +1089,10 @@
             stopAllInteractions(true);
             switchToSelectTool();
             render();
+        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+            e.key.toLowerCase() === "s") {
+            e.preventDefault();
+            exportPngButton.click();
         } else if (e.key === "Delete" && selectedShape && !targetIsEditable) {
             e.preventDefault();
             const selectedIndex = shapes.indexOf(selectedShape);

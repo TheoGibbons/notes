@@ -64,6 +64,7 @@ python tools/make-icons.py
 - **Fit to view:** Press `Space` to zoom and pan so everything you have drawn fits
   on screen (ignored while the Text tool is active or you are editing text).
 - **Undo/Redo:** Use the toolbar buttons or `Ctrl+Z` / `Ctrl+Y`.
+- **Export PNG:** Click **PNG** under Export or press `Ctrl+S` (`Cmd+S` on macOS).
 - **Clear:** Click **Clear** to wipe the canvas.
 
 ## Local Saves
