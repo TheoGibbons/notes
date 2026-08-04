@@ -2778,13 +2778,31 @@
         handlePrimaryDownAtWorld(world, e.clientX, e.clientY);
     });
 
-    canvas.addEventListener("mousemove", (e) => {
+    function hasActiveMouseInteraction() {
+        return isDrawing || isPanning || isDraggingSelection || isResizing ||
+            isRotating || Boolean(cropDragHandle);
+    }
+
+    // Tracked on the window so a drag keeps following the mouse when it leaves
+    // the canvas (or the browser window) and only ends on a real mouse up.
+    window.addEventListener("mousemove", (e) => {
+        if (!hasActiveMouseInteraction()) return;
+
+        // The button was released outside the window: end the interaction
+        // instead of resuming it when the mouse comes back.
+        if (e.buttons === 0) {
+            stopAllInteractions();
+            return;
+        }
+
         const world = screenToWorld(e.clientX, e.clientY);
         handlePointerMove(world, e.clientX, e.clientY, e.shiftKey);
     });
 
-    canvas.addEventListener("mouseup", () => stopAllInteractions());
-    canvas.addEventListener("mouseleave", () => stopAllInteractions());
+    window.addEventListener("mouseup", () => {
+        if (!hasActiveMouseInteraction()) return;
+        stopAllInteractions();
+    });
 
     // Scroll wheel zoom (desktop)
     canvas.addEventListener("wheel", (e) => {
