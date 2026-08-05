@@ -13,8 +13,8 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Adjustable stroke size (pen, rectangle, circle, arrow), text size, and color
 - Zoom with the mouse wheel and pan with the Hand tool or middle mouse button
 - Undo/Redo history
-- Export as PNG image or JSON data
-- Local saves stored in your browser via `localStorage`
+- Export as PNG image or JSON data, and import JSON, from the **Save/Import** menu
+- Local saves stored in your browser, listed in the same menu
 - Installable as an app (PWA) and fully usable offline
 
 ## How to Run
@@ -83,10 +83,24 @@ python tools/make-icons.py
   **Reset** brings the whole picture back. Cropping never discards pixels, so
   cropping again — even after moving, resizing, or rotating the image — starts
   from the full original.
-- **Export PNG:** Click **PNG** under Export or press `Ctrl+S` (`Cmd+S` on macOS).
+- **Export PNG:** Choose **Export PNG** from the **Save/Import** menu, or press
+  `Ctrl+S` (`Cmd+S` on macOS).
 - **Clear:** Click **Clear** to wipe the canvas.
 
+## Save/Import Menu
+Hover over (or click) **Save/Import** in the toolbar to open it. Clicking pins the
+menu open; click again, press `Esc`, or click elsewhere to close it. It holds:
+
+- **Export PNG** / **Export JSON** — download the drawing as an image or as data.
+- **Import JSON** — load a drawing previously exported as JSON.
+- **Local saves** — **Save now…** asks for a name and stores the current drawing
+  in this browser; every existing save is listed below it, newest timestamp shown
+  alongside each name. Click one to load it. Automatic saves are listed in blue.
+
+Unsaved changes are autosaved before you load or import another drawing, so
+switching drawings never silently discards work.
+
 ## Local Saves
-- Click **Save** to store the current drawing in browser `localStorage` under a name you choose.
-- Use the dropdown to load a previously saved drawing (in the same browser on the same device).
+- Saves live in the browser's IndexedDB storage on the device you made them on.
+- Save names cannot begin with "Autosave", which is reserved for automatic saves.
 - Saved data is browser-specific and may be cleared if you clear site data or switch browsers/devices.

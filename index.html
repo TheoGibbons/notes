@@ -5,8 +5,7 @@
     <title>Simple Drawing Pad</title>
     <link rel="icon" type="image/png" href="favicon.png" />
     <!-- Prevent page zoom; we handle zoom ourselves on the canvas -->
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<!--    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />-->
 
     <!-- Installable app (PWA) -->
     <link rel="manifest" href="manifest.json" />
@@ -95,20 +94,100 @@
             border-color: #28a745;
             color: #fff;
         }
-        /* Save names (and their timestamps) can be long — keep the dropdown
-           from stretching the toolbar, and let the title show the full text. */
-        #load-local {
-            max-width: 220px;
+        /* Save/Import dropdown */
+        .menu {
+            position: relative;
+            display: inline-flex;
+        }
+        .menu-panel {
+            position: absolute;
+            /* Flush against the button: any gap here is a dead zone the pointer
+               would cross on its way down, closing the menu. */
+            top: 100%;
+            left: 0;
+            z-index: 30;
+            min-width: 240px;
+            max-width: 340px;
+            padding: 4px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background: #fff;
+            box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+        }
+        .menu-panel[hidden] {
+            display: none;
+        }
+        .toolbar .menu-panel button {
+            display: block;
+            width: 100%;
+            text-align: left;
+            border: 0;
+            background: transparent;
+            padding: 6px 8px;
+            /* Save names (and their timestamps) can be long — keep the panel
+               from growing, and let the title show the full text. */
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        #load-local.save-success {
-            outline: 15px solid rgb(40 167 69 / 50%);
-            outline-offset: 1px;
+        .toolbar .menu-panel button:hover,
+        .toolbar .menu-panel button:focus-visible {
+            background: #eaf3ff;
         }
-        #load-local option.autosave-option {
+        .toolbar .menu-panel button.autosave-option {
             color: #006dcc;
+        }
+        .submenu {
+            position: relative;
+        }
+        .submenu[hidden] {
+            display: none;
+        }
+        .submenu-panel {
+            position: absolute;
+            /* Flush against the parent row for the same reason the main panel is
+               flush against its button: no dead zone for the pointer to cross. */
+            top: 0;
+            left: 100%;
+            z-index: 31;
+            min-width: 240px;
+            max-width: 340px;
+            padding: 4px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background: #fff;
+            box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+        }
+        /* Applied when the panel would run off the right edge of the window. */
+        .submenu-panel.flip-left {
+            left: auto;
+            right: 100%;
+        }
+        .submenu-panel[hidden] {
+            display: none;
+        }
+        .menu-separator {
+            height: 1px;
+            background: #ddd;
+            margin: 4px 2px;
+        }
+        .menu-heading {
+            font-weight: 600;
+            color: #555;
+            padding: 4px 8px 2px;
+        }
+        .menu-saves {
+            max-height: 260px;
+            overflow-y: auto;
+        }
+        .menu-empty {
+            color: #888;
+            padding: 4px 8px 6px;
+        }
+        #save-menu-button.save-success {
+            background: #28a745;
+            border-color: #28a745;
+            color: #fff;
         }
         .toolbar .group-label {
             font-weight: 600;
@@ -256,18 +335,25 @@
 
     <div class="divider"></div>
 
-    <span class="group-label">Export:</span>
-    <button id="export-png">PNG</button>
-    <button id="export-json">JSON</button>
-    <button id="import-json" title="Import a JSON drawing">Import JSON</button>
+    <div class="menu" id="save-menu">
+        <button id="save-menu-button" aria-haspopup="true" aria-expanded="false"
+                title="Export, import and local saves">Save/Import ▾</button>
+        <div class="menu-panel" id="save-menu-panel" role="menu" hidden>
+            <button type="button" role="menuitem" id="export-png">Export PNG</button>
+            <button type="button" role="menuitem" id="export-json">Export JSON</button>
+            <button type="button" role="menuitem" id="import-json">Import JSON</button>
+            <div class="menu-separator"></div>
+            <div class="menu-heading">Local saves</div>
+            <button type="button" role="menuitem" id="save-local">Save now…</button>
+            <div class="submenu" id="autosaves-menu" hidden>
+                <button type="button" role="menuitem" id="autosaves-button"
+                        aria-haspopup="true" aria-expanded="false">Autosaves ▸</button>
+                <div class="submenu-panel menu-saves" id="autosaves-list" role="menu" hidden></div>
+            </div>
+            <div class="menu-saves" id="local-saves-list"></div>
+        </div>
+    </div>
     <input type="file" id="json-file-input" accept="application/json,.json" style="display:none" />
-
-    <div class="divider"></div>
-
-    <span class="group-label">Local saves:</span>
-    <input type="text" id="save-name" value="Drawing 1" aria-label="Save name" />
-    <button id="save-local">Save</button>
-    <select id="load-local" title="Previous saves"></select>
 
     <div class="spacer"></div>
 
@@ -293,9 +379,14 @@
     const exportJsonButton = document.getElementById("export-json");
     const importJsonButton = document.getElementById("import-json");
     const jsonFileInput = document.getElementById("json-file-input");
+    const saveMenu = document.getElementById("save-menu");
+    const saveMenuButton = document.getElementById("save-menu-button");
+    const saveMenuPanel = document.getElementById("save-menu-panel");
     const saveLocalButton = document.getElementById("save-local");
-    const saveNameInput = document.getElementById("save-name");
-    const loadLocalSelect = document.getElementById("load-local");
+    const localSavesList = document.getElementById("local-saves-list");
+    const autosavesMenu = document.getElementById("autosaves-menu");
+    const autosavesButton = document.getElementById("autosaves-button");
+    const autosavesList = document.getElementById("autosaves-list");
 
     const insertImageButton = document.getElementById("insert-image");
     const imageFileInput = document.getElementById("image-file-input");
@@ -1220,10 +1311,14 @@
 
     // Local saves
     let saves = {};
+    let currentSaveName = "Drawing 1";
     let saveSuccessTimeout = null;
     let saveOperationQueue = Promise.resolve();
     let saveDatabasePromise = null;
-    refreshSavesDropdown();
+    // Declared here because the first refreshSavesMenu() below can already close
+    // the Autosaves submenu, long before its handlers are wired up.
+    let autosavesMenuPinned = false;
+    refreshSavesMenu();
     const savesReady = initializeSaveStorage();
 
     // Resize canvas
@@ -1563,6 +1658,10 @@
 
         if (e.key === "Escape") {
             e.preventDefault();
+            if (isSaveMenuOpen()) {
+                closeSaveMenu();
+                return;
+            }
             if (cropSession) {
                 cancelImageCrop();
                 return;
@@ -1622,6 +1721,7 @@
 
     // Export PNG
     exportPngButton.addEventListener("click", () => {
+        closeSaveMenu();
         commitCurrentTextEditor();
         // Commit any crop first so its overlay is not baked into the export.
         applyImageCrop();
@@ -1636,6 +1736,7 @@
 
     // Export JSON
     exportJsonButton.addEventListener("click", () => {
+        closeSaveMenu();
         applyImageCrop();
         const data = JSON.stringify({ shapes, camera }, null, 2);
         const blob = new Blob([data], { type: "application/json" });
@@ -1748,7 +1849,10 @@
         };
     }
 
-    importJsonButton.addEventListener("click", () => jsonFileInput.click());
+    importJsonButton.addEventListener("click", () => {
+        closeSaveMenu();
+        jsonFileInput.click();
+    });
 
     jsonFileInput.addEventListener("change", async () => {
         const file = jsonFileInput.files?.[0];
@@ -1768,8 +1872,7 @@
             pushHistory();
 
             const baseName = file.name.replace(/\.json$/i, "") || "Imported drawing";
-            saveNameInput.value = isAutosaveName(baseName) ? `Imported ${baseName}` : baseName;
-            saveNameInput.setCustomValidity("");
+            currentSaveName = isAutosaveName(baseName) ? `Imported ${baseName}` : baseName;
             switchToSelectTool();
             render();
         } catch (error) {
@@ -1873,7 +1976,7 @@
             const loadedNames = Object.keys(saves);
             pruneAutosaves(saves);
             await deleteSaveRecords(loadedNames.filter(name => !saves[name]));
-            refreshSavesDropdown();
+            refreshSavesMenu();
             return true;
         } catch (error) {
             console.error("Could not initialize drawing save storage", error);
@@ -1881,59 +1984,84 @@
         }
     }
 
-    function refreshSavesDropdown() {
-        loadLocalSelect.innerHTML = "";
-        const placeholder = document.createElement("option");
-        placeholder.value = "";
-        placeholder.textContent = "Previous saves…";
-        placeholder.disabled = true;
-        placeholder.selected = true;
-        loadLocalSelect.appendChild(placeholder);
+    // Lists every save in the menu: autosaves behind their own submenu, named
+    // saves directly in the panel.
+    function refreshSavesMenu() {
+        localSavesList.innerHTML = "";
+        autosavesList.innerHTML = "";
 
-        const names = Object.keys(saves).sort((a, b) => a.localeCompare(b));
-        for (const name of names) {
-            const opt = document.createElement("option");
-            opt.value = name;
-            if (isAutosaveName(name)) opt.classList.add("autosave-option");
-            opt.textContent = saves[name]?.updatedAt
-                ? `${name} (${new Date(saves[name].updatedAt).toLocaleString()})`
-                : name;
-            loadLocalSelect.appendChild(opt);
+        const names = Object.keys(saves);
+        const autosaveNames = names.filter(isAutosaveName).sort(newestFirst(saves));
+        const namedSaves = names.filter(name => !isAutosaveName(name))
+            .sort((a, b) => a.localeCompare(b));
+
+        autosavesMenu.hidden = autosaveNames.length === 0;
+        if (autosavesMenu.hidden) closeAutosavesMenu();
+        autosaveNames.forEach(name => autosavesList.appendChild(createSaveItem(name)));
+
+        if (names.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "menu-empty";
+            empty.textContent = "No saved drawings yet.";
+            localSavesList.appendChild(empty);
+            return;
         }
-        loadLocalSelect.disabled = names.length === 0;
-        updateSavesDropdownTitle();
+
+        namedSaves.forEach(name => localSavesList.appendChild(createSaveItem(name)));
     }
 
-    // The dropdown is clipped to keep the toolbar tidy, so the tooltip carries
-    // the full text of whatever is selected.
-    function updateSavesDropdownTitle() {
-        const selected = loadLocalSelect.selectedOptions[0];
-        loadLocalSelect.title = selected && selected.value
-            ? selected.textContent
-            : "Previous saves";
+    function createSaveItem(name) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        if (isAutosaveName(name)) item.classList.add("autosave-option");
+        // Autosave names already carry their timestamp — don't repeat it.
+        const label = saves[name]?.updatedAt && !isAutosaveName(name)
+            ? `${name} (${formatSaveTimestamp(saves[name].updatedAt)})`
+            : name;
+        item.textContent = label;
+        // Rows are clipped to keep the panel narrow, so the tooltip carries
+        // the full text.
+        item.title = label;
+        item.addEventListener("click", () => loadNamedDrawing(name));
+        return item;
+    }
+
+    // "2026-08-03 4:07:59 PM" — sortable date, readable clock.
+    function formatSaveTimestamp(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        const pad = number => String(number).padStart(2, "0");
+        const hours = date.getHours() % 12 || 12;
+        const meridiem = date.getHours() < 12 ? "AM" : "PM";
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+            + ` ${hours}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${meridiem}`;
     }
 
     function isAutosaveName(name) {
         return /^autosave/i.test(name);
     }
 
-    function pruneAutosaves(saveCollection) {
-        const autosaveNames = Object.keys(saveCollection)
-            .filter(isAutosaveName)
-            .sort((a, b) => {
-                const aTime = new Date(saveCollection[a]?.updatedAt || 0).getTime();
-                const bTime = new Date(saveCollection[b]?.updatedAt || 0).getTime();
-                return bTime - aTime;
-            });
+    function newestFirst(saveCollection) {
+        return (a, b) => {
+            const aTime = new Date(saveCollection[a]?.updatedAt || 0).getTime();
+            const bTime = new Date(saveCollection[b]?.updatedAt || 0).getTime();
+            return bTime - aTime;
+        };
+    }
 
-        autosaveNames.slice(10).forEach(name => delete saveCollection[name]);
+    function pruneAutosaves(saveCollection) {
+        Object.keys(saveCollection)
+            .filter(isAutosaveName)
+            .sort(newestFirst(saveCollection))
+            .slice(10)
+            .forEach(name => delete saveCollection[name]);
     }
 
     function flashSaveSuccess() {
-        loadLocalSelect.classList.add("save-success");
+        saveMenuButton.classList.add("save-success");
         if (saveSuccessTimeout) clearTimeout(saveSuccessTimeout);
         saveSuccessTimeout = setTimeout(() => {
-            loadLocalSelect.classList.remove("save-success");
+            saveMenuButton.classList.remove("save-success");
             saveSuccessTimeout = null;
         }, 1500);
     }
@@ -1975,7 +2103,7 @@
         }
 
         saves = nextSaves;
-        refreshSavesDropdown();
+        refreshSavesMenu();
         markCurrentDrawingClean();
         if (showSuccess) flashSaveSuccess();
         return true;
@@ -1987,57 +2115,47 @@
         }
         updateDirtyState();
         if (!isDirty) return true;
-        const autosaveName = `Autosave (${new Date().toLocaleString()})`;
+        const autosaveName = `Autosave (${formatSaveTimestamp(new Date())})`;
         return storeDrawing(autosaveName, { showError });
     }
 
     async function saveNamedDrawing() {
+        closeSaveMenu();
         commitCurrentTextEditor();
-        const name = saveNameInput.value.trim();
-        if (!name) {
-            saveNameInput.focus();
+
+        let suggestion = isAutosaveName(currentSaveName) ? "" : currentSaveName;
+        for (;;) {
+            const entered = prompt("Name for this save:", suggestion);
+            if (entered === null) return; // cancelled
+            const name = entered.trim();
+            if (!name) {
+                alert("Please enter a name for the save.");
+                suggestion = "";
+                continue;
+            }
+            if (isAutosaveName(name)) {
+                alert('Save names cannot begin with "Autosave".');
+                suggestion = name;
+                continue;
+            }
+            currentSaveName = name;
+            await storeDrawing(name, { showSuccess: true, showError: true });
             return;
         }
-        if (isAutosaveName(name)) {
-            saveNameInput.setCustomValidity('Save names cannot begin with "Autosave".');
-            saveNameInput.reportValidity();
-            saveNameInput.focus();
-            return;
-        }
-        saveNameInput.setCustomValidity("");
-        await storeDrawing(name, { showSuccess: true, showError: true });
     }
 
-    saveLocalButton.addEventListener("click", saveNamedDrawing);
+    async function loadNamedDrawing(name) {
+        if (!saves[name]) return;
+        closeSaveMenu();
 
-    saveNameInput.addEventListener("input", () => {
-        saveNameInput.setCustomValidity("");
-    });
-
-    saveNameInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            saveNamedDrawing();
-        }
-    });
-
-    loadLocalSelect.addEventListener("change", updateSavesDropdownTitle);
-
-    loadLocalSelect.addEventListener("change", async () => {
-        const name = loadLocalSelect.value;
-        if (!name || !saves[name]) return;
-
-        if (!await autosaveIfDirty(true)) {
-            loadLocalSelect.value = "";
-            updateSavesDropdownTitle();
-            return;
-        }
+        // Autosaving can prune old autosaves, so re-check the save afterwards.
+        if (!await autosaveIfDirty(true)) return;
+        const save = saves[name];
+        if (!save) return;
 
         cancelImageCrop();
         destroyTextEditor();
-        const save = saves[name];
-        saveNameInput.value = name;
-        saveNameInput.setCustomValidity("");
+        currentSaveName = name;
         shapes = cloneShapes(save.shapes || []);
         markCurrentDrawingClean();
         camera = save.camera ? { ...save.camera } : { x: 0, y: 0, scale: 1 };
@@ -2049,6 +2167,99 @@
         pushHistory();
         updateControlVisibility();
         render();
+    }
+
+    saveLocalButton.addEventListener("click", saveNamedDrawing);
+
+    // The Save/Import menu opens on hover and stays open once clicked.
+    let saveMenuPinned = false;
+    let saveMenuCloseTimer = null;
+
+    function isSaveMenuOpen() {
+        return !saveMenuPanel.hidden;
+    }
+
+    function cancelPendingSaveMenuClose() {
+        if (!saveMenuCloseTimer) return;
+        clearTimeout(saveMenuCloseTimer);
+        saveMenuCloseTimer = null;
+    }
+
+    function openSaveMenu(pin = false) {
+        cancelPendingSaveMenuClose();
+        if (pin) saveMenuPinned = true;
+        saveMenuPanel.hidden = false;
+        saveMenuButton.setAttribute("aria-expanded", "true");
+    }
+
+    function closeSaveMenu() {
+        cancelPendingSaveMenuClose();
+        closeAutosavesMenu();
+        saveMenuPinned = false;
+        saveMenuPanel.hidden = true;
+        saveMenuButton.setAttribute("aria-expanded", "false");
+    }
+
+    // The Autosaves submenu follows the same hover-to-open, click-to-pin rules.
+    function openAutosavesMenu(pin = false) {
+        if (autosavesMenu.hidden) return;
+        if (pin) autosavesMenuPinned = true;
+        autosavesList.hidden = false;
+        autosavesButton.setAttribute("aria-expanded", "true");
+        // Flip to the left of the parent panel when the window can't fit it.
+        autosavesList.classList.remove("flip-left");
+        if (autosavesList.getBoundingClientRect().right > window.innerWidth - 8) {
+            autosavesList.classList.add("flip-left");
+        }
+    }
+
+    function closeAutosavesMenu() {
+        autosavesMenuPinned = false;
+        autosavesList.hidden = true;
+        autosavesButton.setAttribute("aria-expanded", "false");
+    }
+
+    autosavesMenu.addEventListener("pointerenter", (e) => {
+        if (e.pointerType === "mouse") openAutosavesMenu();
+    });
+
+    autosavesMenu.addEventListener("pointerleave", (e) => {
+        if (e.pointerType === "mouse" && !autosavesMenuPinned) closeAutosavesMenu();
+    });
+
+    autosavesButton.addEventListener("click", () => {
+        if (!autosavesList.hidden && autosavesMenuPinned) closeAutosavesMenu();
+        else openAutosavesMenu(true);
+    });
+
+    // Hovering another row in the parent panel dismisses the submenu.
+    saveMenuPanel.addEventListener("pointerover", (e) => {
+        if (autosavesMenuPinned || autosavesMenu.contains(e.target)) return;
+        closeAutosavesMenu();
+    });
+
+    saveMenu.addEventListener("pointerenter", (e) => {
+        if (e.pointerType === "mouse") openSaveMenu();
+    });
+
+    // Closing on a grace delay forgives a pointer that clips a corner of the
+    // menu on its way to an item.
+    saveMenu.addEventListener("pointerleave", (e) => {
+        if (e.pointerType !== "mouse" || saveMenuPinned) return;
+        cancelPendingSaveMenuClose();
+        saveMenuCloseTimer = setTimeout(() => {
+            saveMenuCloseTimer = null;
+            if (!saveMenuPinned) closeSaveMenu();
+        }, 400);
+    });
+
+    saveMenuButton.addEventListener("click", () => {
+        if (isSaveMenuOpen() && saveMenuPinned) closeSaveMenu();
+        else openSaveMenu(true);
+    });
+
+    document.addEventListener("pointerdown", (e) => {
+        if (isSaveMenuOpen() && !saveMenu.contains(e.target)) closeSaveMenu();
     });
 
     setInterval(() => autosaveIfDirty(false), 30000);
@@ -3180,7 +3391,10 @@
         loadImageSource(src, (img) => {
             applyImageCrop();
             const baseScale = camera.scale || 1;
-            const maxDimension = Math.min(canvas.width, canvas.height) / baseScale * 0.5;
+            // Size the image as if the view were at its initial 100% zoom, so the
+            // same picture always lands at the same size on the page no matter how
+            // far the view happens to be zoomed in or out.
+            const maxDimension = Math.min(canvas.width, canvas.height) * 0.5;
             const aspect = img.naturalWidth / img.naturalHeight;
             let width;
             let height;
