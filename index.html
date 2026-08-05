@@ -116,7 +116,7 @@
         }
         .toolbar .divider {
             width: 1px;
-            height: 24px;
+            height: 31px;
             background: #ddd;
             margin: 0 6px;
         }
@@ -395,6 +395,10 @@
     // Set when a click landed on an already multi-selected shape: if the drag
     // turns out to be a plain click, the selection collapses to just that shape.
     let collapseSelectionTo = null;
+    let isMarqueeSelecting = false;
+    let marqueeStartWorld = null;
+    let marqueeRect = null;          // world-space { minX, minY, maxX, maxY }
+    let marqueeBaseSelection = [];   // selection the marquee started from
     let isResizing = false;
     let isRotating = false;
     let activeHandle = null; // e.g. 'tl','tr','br','bl','t','r','b','l','rot'
@@ -642,10 +646,12 @@
         } else if (selectedShapes.length) {
             // Transform handles belong to a single shape, so a multi-selection
             // gets plain outlines plus one box around the whole group.
-            const withHandles = selectedShapes.length === 1;
+            const withHandles = selectedShapes.length === 1 && !isMarqueeSelecting;
             for (const s of selectedShapes) drawSelectionOutline(s, scale, withHandles);
             if (!withHandles) drawMultiSelectionBounds(scale);
         }
+
+        if (isMarqueeSelecting) drawMarquee(scale);
     }
 
     function drawMultiSelectionBounds(scale) {
@@ -2429,6 +2435,68 @@
         updateCanvasCursor();
     }
 
+    // --- Rubber-band marquee ----------------------------------------------
+    // Dragging from empty canvas with the Select tool sweeps out a box and
+    // selects everything it touches. A shape counts as touched when its
+    // axis-aligned world extent overlaps the box — the same extent its
+    // selection outline is drawn from, so what you see is what you get.
+
+    function beginMarquee(world, addToSelection) {
+        isMarqueeSelecting = true;
+        marqueeStartWorld = { ...world };
+        marqueeRect = { minX: world.x, minY: world.y, maxX: world.x, maxY: world.y };
+        marqueeBaseSelection = addToSelection ? selectedShapes : [];
+        setSelection([...marqueeBaseSelection]);
+    }
+
+    function updateMarquee(world) {
+        if (!marqueeStartWorld) return;
+        marqueeRect = {
+            minX: Math.min(marqueeStartWorld.x, world.x),
+            minY: Math.min(marqueeStartWorld.y, world.y),
+            maxX: Math.max(marqueeStartWorld.x, world.x),
+            maxY: Math.max(marqueeStartWorld.y, world.y),
+        };
+
+        // Rebuild from the pre-drag selection every frame so shrinking the box
+        // releases shapes it no longer covers.
+        const swept = shapes.filter(shape => {
+            if (marqueeBaseSelection.includes(shape)) return false;
+            const extent = getShapeWorldExtent(shape);
+            if (!extent) return false;
+            return extent.minX <= marqueeRect.maxX && extent.maxX >= marqueeRect.minX &&
+                extent.minY <= marqueeRect.maxY && extent.maxY >= marqueeRect.minY;
+        });
+        setSelection([...marqueeBaseSelection, ...swept]);
+    }
+
+    function endMarquee(cancelled) {
+        if (!isMarqueeSelecting) return;
+        if (cancelled) setSelection([...marqueeBaseSelection]);
+        isMarqueeSelecting = false;
+        marqueeStartWorld = null;
+        marqueeRect = null;
+        marqueeBaseSelection = [];
+        updateControlVisibility();
+        render();
+    }
+
+    function drawMarquee(scale) {
+        if (!marqueeRect) return;
+        const x = (marqueeRect.minX - camera.x) * scale;
+        const y = (marqueeRect.minY - camera.y) * scale;
+        const w = (marqueeRect.maxX - marqueeRect.minX) * scale;
+        const h = (marqueeRect.maxY - marqueeRect.minY) * scale;
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 123, 255, 0.08)";
+        ctx.fillRect(x, y, w, h);
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#007bff";
+        ctx.strokeRect(x, y, w, h);
+        ctx.restore();
+    }
+
     // Start a resize interaction for a transformable shape and remember original bounds.
     function beginResize(shape, handleInfo, world) {
         isResizing = true;
@@ -2630,15 +2698,19 @@
             const hit = hitTestShapes(world.x, world.y);
             collapseSelectionTo = null;
 
-            if (addToSelection) {
+            if (!hit) {
+                // Empty canvas: sweep out a marquee. A click that never moves
+                // simply ends up selecting nothing, as it always did.
+                beginMarquee(world, addToSelection);
+            } else if (addToSelection) {
                 // Ctrl/Shift+click adds to (or removes from) the selection.
-                if (hit) toggleShapeSelected(hit);
-            } else if (hit && isShapeSelected(hit) && selectedShapes.length > 1) {
+                toggleShapeSelected(hit);
+            } else if (isShapeSelected(hit) && selectedShapes.length > 1) {
                 // Clicking inside a group drags all of it; a click that never
                 // moves collapses the selection to this shape on mouse up.
                 collapseSelectionTo = hit;
             } else {
-                setSelection(hit ? [hit] : []);
+                setSelection([hit]);
             }
 
             if (hit && isShapeSelected(hit)) {
@@ -2688,6 +2760,12 @@
             render();
         } else if (currentTool === "eraser" && isDrawing) {
             eraseAt(world.x, world.y);
+            render();
+        } else if (isMarqueeSelecting && !isPanning) {
+            // Checked before the branch below: the marquee owns the pointer even
+            // once it has swept up shapes and made the selection non-empty.
+            updateMarquee(world);
+            updateControlVisibility();
             render();
         } else if (currentTool === "select" && selectedShapes.length && !isPanning) {
             if (isResizing && isTransformableShape(selectedShape) && originalBounds) {
@@ -2793,6 +2871,9 @@
     }
 
     function stopAllInteractions(cancelDrawing = false) {
+        // Escape puts the selection back the way the marquee found it.
+        if (isMarqueeSelecting) endMarquee(cancelDrawing);
+
         // A crop drag ends on pointer up, but the session stays open until it
         // is applied or cancelled.
         if (cropSession) {
@@ -2897,7 +2978,7 @@
 
     function hasActiveMouseInteraction() {
         return isDrawing || isPanning || isDraggingSelection || isResizing ||
-            isRotating || Boolean(cropDragHandle);
+            isRotating || isMarqueeSelecting || Boolean(cropDragHandle);
     }
 
     // Tracked on the window so a drag keeps following the mouse when it leaves
@@ -2968,6 +3049,7 @@
             isDrawing = false;
             isPanning = false;
             isDraggingSelection = false;
+            endMarquee(true);   // a second finger means zoom, not selection
 
             const t1 = touches[0];
             const t2 = touches[1];
