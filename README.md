@@ -8,6 +8,7 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 
 ## Features
 - Pen, Text, Eraser, Select/Move, and Hand/Pan tools
+- Select one item or many, then move, restyle, reorder, or delete them together
 - Insert images and crop them non-destructively
 - Adjustable stroke size (pen, rectangle, circle, arrow), text size, and color
 - Zoom with the mouse wheel and pan with the Hand tool or middle mouse button
@@ -61,6 +62,16 @@ python tools/make-icons.py
 - **Change color/size:** Use the toolbar controls for color and size.
 - **Add text:** Select **Text**, click on the canvas, and enter your text.
 - **Edit/move:** Use **Select/Move** to pick and drag existing strokes or text.
+- **Select several items:** `Ctrl+click` (or `Shift+click`) each one to add it to the
+  selection, or click it again to drop it. `Ctrl+A` selects everything and switches
+  to **Select/Move**. Dragging any selected item moves the whole group; clicking one
+  without dragging narrows the selection back down to that item, and clicking empty
+  canvas clears it.
+- **Delete:** Press `Delete` to remove everything currently selected — `Ctrl+A` then
+  `Delete` wipes the drawing. Colour, size, fill, and **Send to Back**/**Bring to
+  Front** also apply to the whole selection, skipping items they cannot affect (a
+  fill colour ignores text, for example). Resize and rotate handles, and **Crop**,
+  need exactly one item selected.
 - **Pan/zoom:** Use **Hand/Pan** or middle mouse to pan, and the mouse wheel to zoom.
 - **Fit to view:** Press `Space` to zoom and pan so everything you have drawn fits
   on screen (ignored while the Text tool is active or you are editing text).

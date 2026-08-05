@@ -206,7 +206,7 @@
     <div class="divider"></div>
 
     <button data-tool="eraser" title="Eraser (E)">Eraser</button>
-    <button data-tool="select" title="Select / Move (V)">Select / Move</button>
+    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add to the selection, Ctrl+A to select all">Select / Move</button>
     <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
 
     <div class="divider"></div>
@@ -236,8 +236,8 @@
 
     <div id="layer-container" class="inline-group">
         <span class="group-label">Order:</span>
-        <button id="send-to-back" title="Send selected item behind everything">Send to Back</button>
-        <button id="bring-to-front" title="Bring selected item in front of everything">Bring to Front</button>
+        <button id="send-to-back" title="Send the selection behind everything">Send to Back</button>
+        <button id="bring-to-front" title="Bring the selection in front of everything">Bring to Front</button>
     </div>
 
     <div id="crop-container" class="inline-group">
@@ -374,7 +374,7 @@
         // The session points at a shape that is about to be replaced.
         cancelImageCrop();
         shapes = JSON.parse(history[index] || "[]");
-        selectedShape = null;
+        clearSelection();
         historyIndex = index;
         updateDirtyState();
         updateHistoryButtons();
@@ -392,6 +392,9 @@
     let isDrawing = false;
     let isPanning = false;         // used for hand tool, middle mouse, and touch pan
     let isDraggingSelection = false;
+    // Set when a click landed on an already multi-selected shape: if the drag
+    // turns out to be a plain click, the selection collapses to just that shape.
+    let collapseSelectionTo = null;
     let isResizing = false;
     let isRotating = false;
     let activeHandle = null; // e.g. 'tl','tr','br','bl','t','r','b','l','rot'
@@ -402,7 +405,52 @@
     let draftShape = null;
     let drawingStartWorld = null;
 
+    // Selection. `selectedShapes` is the whole selection; `selectedShape` is a
+    // convenience mirror that is only set when exactly one shape is selected,
+    // because resize/rotate handles, cropping, and layering all need a single
+    // target. Never assign to either directly — go through setSelection().
+    let selectedShapes = [];
     let selectedShape = null;
+
+    function setSelection(nextSelection) {
+        selectedShapes = nextSelection;
+        selectedShape = selectedShapes.length === 1 ? selectedShapes[0] : null;
+    }
+
+    function clearSelection() {
+        setSelection([]);
+    }
+
+    function isShapeSelected(shape) {
+        return selectedShapes.includes(shape);
+    }
+
+    function deselectShape(shape) {
+        if (!isShapeSelected(shape)) return;
+        setSelection(selectedShapes.filter(s => s !== shape));
+    }
+
+    function toggleShapeSelected(shape) {
+        if (isShapeSelected(shape)) deselectShape(shape);
+        else setSelection([...selectedShapes, shape]);
+    }
+
+    // Shapes in the selection that carry a given property, so the toolbar can
+    // edit a mixed selection without touching shapes the control cannot affect.
+    function selectedShapesWith(predicate) {
+        return selectedShapes.filter(predicate);
+    }
+
+    // Ctrl/Cmd+A. Selecting only makes sense with the Select tool, so switch to
+    // it rather than leaving a selection the current tool cannot act on.
+    function selectAllShapes() {
+        commitCurrentTextEditor();
+        applyImageCrop();
+        setSelection([...shapes]);
+        switchToSelectTool();
+        updateControlVisibility();
+        render();
+    }
 
     // Image cropping. While a session is active the shape itself is untouched;
     // `rect` is the pending crop window and only Apply writes it back.
@@ -504,7 +552,7 @@
             if (isNew && newText.trim() === "") {
                 const shapeIndex = shapes.indexOf(shape);
                 if (shapeIndex !== -1) shapes.splice(shapeIndex, 1);
-                if (selectedShape === shape) selectedShape = null;
+                deselectShape(shape);
             } else {
                 shape.text = newText;
             }
@@ -531,7 +579,7 @@
                 if (isNew) {
                     const shapeIndex = shapes.indexOf(shape);
                     if (shapeIndex !== -1) shapes.splice(shapeIndex, 1);
-                    if (selectedShape === shape) selectedShape = null;
+                    deselectShape(shape);
                 }
                 destroyTextEditor();
                 updateControlVisibility();
@@ -591,9 +639,30 @@
 
         if (cropSession) {
             drawCropOverlay();
-        } else if (selectedShape) {
-            drawSelectionOutline(selectedShape, scale);
+        } else if (selectedShapes.length) {
+            // Transform handles belong to a single shape, so a multi-selection
+            // gets plain outlines plus one box around the whole group.
+            const withHandles = selectedShapes.length === 1;
+            for (const s of selectedShapes) drawSelectionOutline(s, scale, withHandles);
+            if (!withHandles) drawMultiSelectionBounds(scale);
         }
+    }
+
+    function drawMultiSelectionBounds(scale) {
+        const extent = getShapesWorldExtent(selectedShapes);
+        if (!extent) return;
+        const pad = 6;
+        ctx.save();
+        ctx.setLineDash([2, 4]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#007bff";
+        ctx.strokeRect(
+            (extent.minX - camera.x) * scale - pad,
+            (extent.minY - camera.y) * scale - pad,
+            (extent.maxX - extent.minX) * scale + pad * 2,
+            (extent.maxY - extent.minY) * scale + pad * 2,
+        );
+        ctx.restore();
     }
 
     // Helpers to draw shapes
@@ -761,7 +830,7 @@
         ctx.restore();
     }
 
-    function drawSelectionOutline(shape, scale) {
+    function drawSelectionOutline(shape, scale, withHandles = true) {
         ctx.save();
         ctx.setLineDash([5, 5]);
         ctx.lineWidth = 1;
@@ -806,15 +875,17 @@
             ctx.moveTo(-halfLength, 0);
             ctx.lineTo(halfLength, 0);
             ctx.stroke();
-            ctx.setLineDash([]);
-            ctx.fillStyle = "#ffffff";
-            ctx.strokeStyle = "#007bff";
-            [-halfLength, halfLength].forEach(endpointX => {
-                ctx.beginPath();
-                ctx.arc(endpointX, 0, 6, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.stroke();
-            });
+            if (withHandles) {
+                ctx.setLineDash([]);
+                ctx.fillStyle = "#ffffff";
+                ctx.strokeStyle = "#007bff";
+                [-halfLength, halfLength].forEach(endpointX => {
+                    ctx.beginPath();
+                    ctx.arc(endpointX, 0, 6, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                });
+            }
             ctx.restore();
         } else if (shape.type === "rect" || shape.type === "image" || shape.type === "circle") {
             const s = camera.scale || 1;
@@ -836,6 +907,12 @@
             ctx.translate(cx, cy);
             ctx.rotate(rot);
             ctx.strokeRect(-w / 2 * s, -h / 2 * s, w * s, h * s);
+
+            if (!withHandles) {
+                ctx.restore();
+                ctx.restore();
+                return;
+            }
 
             // Draw resize handles (4 corners)
             const hs = 8;
@@ -923,7 +1000,7 @@
             initialRect: { ...rect },
         };
 
-        selectedShape = shape;
+        setSelection([shape]);
         switchToSelectTool();
         updateControlVisibility();
         updateCanvasCursor();
@@ -1160,30 +1237,31 @@
     function updatePenSizeVisibility() {
         const isSizedDrawingTool = currentTool === "pen" || currentTool === "rect" ||
             currentTool === "circle" || currentTool === "arrow";
-        const widthProperty = getShapeWidthProperty(selectedShape);
-        if (currentTool === "select" && widthProperty) {
-            penWidth = selectedShape[widthProperty];
+        // A mixed selection follows the first shape the control can affect.
+        const sized = selectedShapesWith(s => getShapeWidthProperty(s));
+        if (currentTool === "select" && sized.length) {
+            penWidth = sized[0][getShapeWidthProperty(sized[0])];
             penSizeInput.value = Math.min(20, Math.max(1, penWidth)).toString();
         }
         penSizeContainer.style.display =
-            isSizedDrawingTool || widthProperty ? "inline-flex" : "none";
+            isSizedDrawingTool || sized.length ? "inline-flex" : "none";
     }
 
     function updateTextSizeVisibility() {
-        const hasSelectedText = selectedShape && selectedShape.type === "text";
-        if (currentTool === "select" && hasSelectedText) {
-            textSize = selectedShape.fontSize;
+        const texts = selectedShapesWith(s => s.type === "text");
+        if (currentTool === "select" && texts.length) {
+            textSize = texts[0].fontSize;
             textSizeInput.value = Math.min(72, Math.max(1, textSize)).toString();
             textSizeValueInput.value = textSize.toString();
         }
         textSizeContainer.style.display =
-            currentTool === "text" || hasSelectedText ? "inline-flex" : "none";
+            currentTool === "text" || texts.length ? "inline-flex" : "none";
     }
 
     function updateColorVisibility() {
         const isColorDrawingTool = currentTool === "pen" || currentTool === "text" ||
             currentTool === "rect" || currentTool === "circle" || currentTool === "arrow";
-        const hasColorableSelection = !!getShapeColorProperty(selectedShape);
+        const hasColorableSelection = selectedShapes.some(s => getShapeColorProperty(s));
         colorContainer.style.display =
             isColorDrawingTool || hasColorableSelection ? "inline-flex" : "none";
     }
@@ -1194,25 +1272,33 @@
 
     function updateFillVisibility() {
         const isFillDrawingTool = currentTool === "rect" || currentTool === "circle";
-        if (currentTool === "select" && isFillableShape(selectedShape)) {
-            fillEnabled = !!selectedShape.fillColor;
+        const fillable = selectedShapesWith(isFillableShape);
+        if (currentTool === "select" && fillable.length) {
+            fillEnabled = !!fillable[0].fillColor;
             fillEnabledInput.checked = fillEnabled;
-            if (selectedShape.fillColor) {
-                fillColor = selectedShape.fillColor;
+            if (fillable[0].fillColor) {
+                fillColor = fillable[0].fillColor;
                 fillColorInput.value = fillColor;
             }
         }
-        fillContainer.style.display = isFillDrawingTool || isFillableShape(selectedShape)
+        fillContainer.style.display = isFillDrawingTool || fillable.length
             ? "inline-flex"
             : "none";
         fillColorInput.disabled = !fillEnabledInput.checked;
     }
 
     function updateLayerVisibility() {
-        const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
-        layerContainer.style.display = selectedIndex === -1 ? "none" : "inline-flex";
-        sendToBackButton.disabled = selectedIndex <= 0;
-        bringToFrontButton.disabled = selectedIndex === -1 || selectedIndex >= shapes.length - 1;
+        const indices = selectedShapes
+            .map(s => shapes.indexOf(s))
+            .filter(index => index !== -1)
+            .sort((a, b) => a - b);
+        layerContainer.style.display = indices.length === 0 ? "none" : "inline-flex";
+        // Already at the far end of the stack means there is nothing to do.
+        const atBack = indices.every((index, offset) => index === offset);
+        const atFront = indices.every((index, offset) =>
+            index === shapes.length - indices.length + offset);
+        sendToBackButton.disabled = indices.length === 0 || atBack;
+        bringToFrontButton.disabled = indices.length === 0 || atFront;
     }
 
     function updateCropVisibility() {
@@ -1299,15 +1385,15 @@
     penColorInput.addEventListener("input", () => {
         penColor = penColorInput.value || "#000000";
 
-        const colorProperty = getShapeColorProperty(selectedShape);
-        if (colorProperty) {
-            selectedShape[colorProperty] = penColor;
+        const colorable = selectedShapesWith(s => getShapeColorProperty(s));
+        if (colorable.length) {
+            colorable.forEach(s => { s[getShapeColorProperty(s)] = penColor; });
             render();
         }
     });
 
     penColorInput.addEventListener("change", () => {
-        if (getShapeColorProperty(selectedShape)) {
+        if (selectedShapes.some(s => getShapeColorProperty(s))) {
             pushHistory();
         }
     });
@@ -1315,8 +1401,9 @@
     fillEnabledInput.addEventListener("change", () => {
         fillEnabled = fillEnabledInput.checked;
         fillColorInput.disabled = !fillEnabled;
-        if (isFillableShape(selectedShape)) {
-            selectedShape.fillColor = fillEnabled ? fillColor : null;
+        const fillable = selectedShapesWith(isFillableShape);
+        if (fillable.length) {
+            fillable.forEach(s => { s.fillColor = fillEnabled ? fillColor : null; });
             pushHistory();
             render();
         }
@@ -1324,29 +1411,30 @@
 
     fillColorInput.addEventListener("input", () => {
         fillColor = fillColorInput.value || "#ffff00";
-        if (fillEnabled && isFillableShape(selectedShape)) {
-            selectedShape.fillColor = fillColor;
+        const fillable = fillEnabled ? selectedShapesWith(isFillableShape) : [];
+        if (fillable.length) {
+            fillable.forEach(s => { s.fillColor = fillColor; });
             render();
         }
     });
 
     fillColorInput.addEventListener("change", () => {
-        if (fillEnabled && isFillableShape(selectedShape)) pushHistory();
+        if (fillEnabled && selectedShapes.some(isFillableShape)) pushHistory();
     });
 
     penSizeInput.addEventListener("input", () => {
         const value = parseInt(penSizeInput.value, 10);
         penWidth = Number.isFinite(value) ? value : penWidth;
 
-        const widthProperty = getShapeWidthProperty(selectedShape);
-        if (widthProperty) {
-            selectedShape[widthProperty] = penWidth;
+        const sized = selectedShapesWith(s => getShapeWidthProperty(s));
+        if (sized.length) {
+            sized.forEach(s => { s[getShapeWidthProperty(s)] = penWidth; });
             render();
         }
     });
 
     penSizeInput.addEventListener("change", () => {
-        if (getShapeWidthProperty(selectedShape)) {
+        if (selectedShapes.some(s => getShapeWidthProperty(s))) {
             pushHistory();
         }
     });
@@ -1354,10 +1442,11 @@
     function applyTextSize(value) {
         if (!Number.isFinite(value) || value < 1) return false;
         textSize = value;
-        if (selectedShape && selectedShape.type === "text") {
-            selectedShape.fontSize = textSize;
-            if (currentTextEditor?.shape === selectedShape) {
-                positionTextEditor(selectedShape, currentTextEditor.input);
+        const texts = selectedShapesWith(s => s.type === "text");
+        if (texts.length) {
+            texts.forEach(s => { s.fontSize = textSize; });
+            if (currentTextEditor && texts.includes(currentTextEditor.shape)) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
             }
             render();
         }
@@ -1370,7 +1459,7 @@
     });
 
     textSizeInput.addEventListener("change", () => {
-        if (selectedShape && selectedShape.type === "text") {
+        if (selectedShapes.some(s => s.type === "text")) {
             pushHistory();
         }
     });
@@ -1388,7 +1477,7 @@
             textSizeValueInput.value = textSize.toString();
             return;
         }
-        if (selectedShape && selectedShape.type === "text") pushHistory();
+        if (selectedShapes.some(s => s.type === "text")) pushHistory();
     });
 
     // Initialize controls
@@ -1407,31 +1496,28 @@
     cropResetButton.addEventListener("click", () => resetImageCrop());
     cropCancelButton.addEventListener("click", () => cancelImageCrop());
 
-    sendToBackButton.addEventListener("click", () => {
-        const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
-        if (selectedIndex <= 0) return;
-        shapes.splice(selectedIndex, 1);
-        shapes.unshift(selectedShape);
+    // Move the whole selection to one end of the stack, keeping the shapes in
+    // the same order relative to each other as they were before.
+    function moveSelectionToStackEnd(toFront) {
+        const moving = shapes.filter(isShapeSelected);
+        if (!moving.length) return;
+        const rest = shapes.filter(s => !isShapeSelected(s));
+        const reordered = toFront ? [...rest, ...moving] : [...moving, ...rest];
+        if (reordered.every((s, index) => s === shapes[index])) return;
+        shapes = reordered;
         pushHistory();
         updateLayerVisibility();
         render();
-    });
+    }
 
-    bringToFrontButton.addEventListener("click", () => {
-        const selectedIndex = selectedShape ? shapes.indexOf(selectedShape) : -1;
-        if (selectedIndex === -1 || selectedIndex >= shapes.length - 1) return;
-        shapes.splice(selectedIndex, 1);
-        shapes.push(selectedShape);
-        pushHistory();
-        updateLayerVisibility();
-        render();
-    });
+    sendToBackButton.addEventListener("click", () => moveSelectionToStackEnd(false));
+    bringToFrontButton.addEventListener("click", () => moveSelectionToStackEnd(true));
 
     // Clear, undo, redo
     clearButton.addEventListener("click", () => {
         cancelImageCrop();
         shapes = [];
-        selectedShape = null;
+        clearSelection();
         destroyTextEditor();
         pushHistory();
         updateControlVisibility();
@@ -1485,17 +1571,22 @@
             e.key.toLowerCase() === "s") {
             e.preventDefault();
             exportPngButton.click();
-        } else if (e.key === "Delete" && selectedShape && !targetIsEditable) {
+        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+            e.key.toLowerCase() === "a" && !targetIsEditable) {
+            e.preventDefault();
+            selectAllShapes();
+        } else if (e.key === "Delete" && selectedShapes.length && !targetIsEditable) {
             e.preventDefault();
             cancelImageCrop();
-            const selectedIndex = shapes.indexOf(selectedShape);
-            if (selectedIndex !== -1) {
-                shapes.splice(selectedIndex, 1);
-                selectedShape = null;
+            const doomed = selectedShapes;
+            const remaining = shapes.filter(s => !doomed.includes(s));
+            clearSelection();
+            if (remaining.length !== shapes.length) {
+                shapes = remaining;
                 pushHistory();
-                updateControlVisibility();
-                render();
             }
+            updateControlVisibility();
+            render();
         } else if (e.key === " " && !targetIsEditable && !currentTextEditor &&
             currentTool !== "text" && !(e.target instanceof HTMLSelectElement) &&
             !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
@@ -1665,7 +1756,7 @@
             destroyTextEditor();
             shapes = imported.shapes;
             camera = imported.camera;
-            selectedShape = null;
+            clearSelection();
             history = [];
             historyIndex = -1;
             pushHistory();
@@ -1945,7 +2036,7 @@
         markCurrentDrawingClean();
         camera = save.camera ? { ...save.camera } : { x: 0, y: 0, scale: 1 };
         if (camera.scale == null) camera.scale = 1;
-        selectedShape = null;
+        clearSelection();
 
         history = [];
         historyIndex = -1;
@@ -2233,9 +2324,9 @@
         };
     }
 
-    function getShapesWorldExtent() {
+    function getShapesWorldExtent(list = shapes) {
         let extent = null;
-        for (const shape of shapes) {
+        for (const shape of list) {
             const shapeExtent = getShapeWorldExtent(shape);
             if (!shapeExtent) continue;
             if (![shapeExtent.minX, shapeExtent.minY, shapeExtent.maxX, shapeExtent.maxY]
@@ -2323,7 +2414,7 @@
 
             if (hit) {
                 shapes.splice(i, 1);
-                if (selectedShape === s) selectedShape = null;
+                deselectShape(s);
                 eraseChanged = true;
                 break;
             }
@@ -2456,7 +2547,7 @@
         }
 
         shapes.push(draftShape);
-        selectedShape = null;
+        clearSelection();
         updateControlVisibility();
         render();
     }
@@ -2482,7 +2573,18 @@
         }
     }
 
-    function handlePrimaryDownAtWorld(world, screenX, screenY) {
+    // Remember where every selected shape started so a drag can move the whole
+    // group from its original positions rather than accumulating rounding.
+    function captureSelectionDragOrigins() {
+        return selectedShapes.map(shape => ({
+            shape,
+            origin: shape.type === "stroke"
+                ? shape.points.map(p => ({ x: p.x, y: p.y }))
+                : { x: shape.x, y: shape.y },
+        }));
+    }
+
+    function handlePrimaryDownAtWorld(world, screenX, screenY, addToSelection = false) {
         // While cropping, the canvas belongs to the crop session: drag a handle
         // or the window itself, and a click anywhere else commits the crop.
         if (cropSession) {
@@ -2501,7 +2603,7 @@
                 width: penWidth,
             };
             shapes.push(currentStroke);
-            selectedShape = null;
+            clearSelection();
             updateControlVisibility();
             render();
         } else if (currentTool === "eraser") {
@@ -2526,18 +2628,24 @@
             }
 
             const hit = hitTestShapes(world.x, world.y);
-            selectedShape = hit;
-            if (hit) {
+            collapseSelectionTo = null;
+
+            if (addToSelection) {
+                // Ctrl/Shift+click adds to (or removes from) the selection.
+                if (hit) toggleShapeSelected(hit);
+            } else if (hit && isShapeSelected(hit) && selectedShapes.length > 1) {
+                // Clicking inside a group drags all of it; a click that never
+                // moves collapses the selection to this shape on mouse up.
+                collapseSelectionTo = hit;
+            } else {
+                setSelection(hit ? [hit] : []);
+            }
+
+            if (hit && isShapeSelected(hit)) {
                 isDraggingSelection = true;
                 dragStartWorld = { ...world };
                 moveChanged = false;
-                if (hit.type === "stroke") {
-                    originalShapeData = hit.points.map(p => ({ x: p.x, y: p.y }));
-                } else if (hit.type === "text") {
-                    originalShapeData = { x: hit.x, y: hit.y };
-                } else if (isTransformableShape(hit)) {
-                    originalShapeData = { x: hit.x, y: hit.y };
-                }
+                originalShapeData = captureSelectionDragOrigins();
             } else {
                 isDraggingSelection = false;
                 originalShapeData = null;
@@ -2554,7 +2662,7 @@
                 color: penColor,
             };
             shapes.push(shape);
-            selectedShape = shape;
+            setSelection([shape]);
             updateControlVisibility();
             render();
             showTextEditor(shape, true);
@@ -2581,7 +2689,7 @@
         } else if (currentTool === "eraser" && isDrawing) {
             eraseAt(world.x, world.y);
             render();
-        } else if (currentTool === "select" && selectedShape && !isPanning) {
+        } else if (currentTool === "select" && selectedShapes.length && !isPanning) {
             if (isResizing && isTransformableShape(selectedShape) && originalBounds) {
                 const b = originalBounds;
                 const minSize = 10 / (camera.scale || 1);
@@ -2653,22 +2761,20 @@
                 selectedShape.rotation = shapeStartRotation + (angle - rotationStartAngle);
                 rotateChanged = true;
                 render();
-            } else if (isDraggingSelection) {
+            } else if (isDraggingSelection && originalShapeData) {
                  const dx = world.x - dragStartWorld.x;
                  const dy = world.y - dragStartWorld.y;
 
-                 if (selectedShape.type === "stroke") {
-                     for (let i = 0; i < selectedShape.points.length; i++) {
-                         const orig = originalShapeData[i];
-                         selectedShape.points[i].x = orig.x + dx;
-                         selectedShape.points[i].y = orig.y + dy;
+                 for (const { shape, origin } of originalShapeData) {
+                     if (shape.type === "stroke") {
+                         for (let i = 0; i < shape.points.length; i++) {
+                             shape.points[i].x = origin[i].x + dx;
+                             shape.points[i].y = origin[i].y + dy;
+                         }
+                     } else {
+                         shape.x = origin.x + dx;
+                         shape.y = origin.y + dy;
                      }
-                 } else if (selectedShape.type === "text") {
-                     selectedShape.x = originalShapeData.x + dx;
-                     selectedShape.y = originalShapeData.y + dy;
-                 } else if (isTransformableShape(selectedShape)) {
-                     selectedShape.x = originalShapeData.x + dx;
-                     selectedShape.y = originalShapeData.y + dy;
                  }
                  moveChanged = true;
                  render();
@@ -2709,7 +2815,7 @@
 
             if (isLargeEnough && !cancelDrawing) {
                 pushHistory();
-                selectedShape = null;
+                clearSelection();
             } else {
                 const draftIndex = shapes.indexOf(draftShape);
                 if (draftIndex !== -1) shapes.splice(draftIndex, 1);
@@ -2731,6 +2837,14 @@
             if (isDraggingSelection && moveChanged) {
                 pushHistory();
             }
+            // A click on a group member that never turned into a drag means the
+            // user was picking that one shape out of the group.
+            if (isDraggingSelection && !moveChanged && collapseSelectionTo &&
+                !cancelDrawing) {
+                setSelection([collapseSelectionTo]);
+                updateControlVisibility();
+                render();
+            }
             if (isResizing && resizeChanged) {
                 pushHistory();
             }
@@ -2742,6 +2856,7 @@
         isDrawing = false;
         isPanning = false;
         isDraggingSelection = false;
+        collapseSelectionTo = null;
         isResizing = false;
         isRotating = false;
         currentStroke = null;
@@ -2775,7 +2890,9 @@
         if (e.button !== 0) return;
 
         const world = screenToWorld(e.clientX, e.clientY);
-        handlePrimaryDownAtWorld(world, e.clientX, e.clientY);
+        // Ctrl/Cmd or Shift extends the selection instead of replacing it.
+        const addToSelection = e.ctrlKey || e.metaKey || e.shiftKey;
+        handlePrimaryDownAtWorld(world, e.clientX, e.clientY, addToSelection);
     });
 
     function hasActiveMouseInteraction() {
@@ -2941,7 +3058,7 @@
         }
         if (shape.type !== "text") return;
 
-        selectedShape = shape;
+        setSelection([shape]);
         updateControlVisibility();
         render();
         showTextEditor(shape);
@@ -3003,7 +3120,7 @@
                 src,
             };
             shapes.push(shape);
-            selectedShape = shape;
+            setSelection([shape]);
             pushHistory();
             switchToSelectTool();
             render();
