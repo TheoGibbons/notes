@@ -247,6 +247,107 @@
         #canvas.drawing-pad.eraser-mode {
             cursor: url("./eraser-cursor.svg") 7 26, crosshair;
         }
+        /* Save Image dialog */
+        .dialog-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgb(0 0 0 / 35%);
+        }
+        .dialog-backdrop[hidden] {
+            display: none;
+        }
+        .dialog {
+            width: min(340px, calc(100vw - 32px));
+            padding: 16px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background: #fff;
+            box-shadow: 0 12px 32px rgb(0 0 0 / 25%);
+            font-size: 14px;
+        }
+        .dialog h2 {
+            margin: 0 0 12px;
+            font-size: 16px;
+        }
+        .dialog-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .dialog-row > label:first-child {
+            font-weight: 600;
+        }
+        .dialog-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 400;
+        }
+        .dialog input[type="text"],
+        .dialog input[type="number"],
+        .dialog select {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            padding: 4px 6px;
+            font: inherit;
+            font-size: 13px;
+        }
+        .dialog input[type="text"] {
+            width: 150px;
+        }
+        .dialog input[type="number"] {
+            width: 80px;
+        }
+        .dialog input[type="color"] {
+            width: 36px;
+            height: 26px;
+            padding: 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+        }
+        .dialog input:disabled,
+        .dialog select:disabled {
+            background: #f5f5f5;
+            color: #888;
+        }
+        .dialog-note {
+            margin: 0 0 12px;
+            color: #666;
+            font-size: 12px;
+            min-height: 15px;
+        }
+        .dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+        .dialog-actions button {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            padding: 5px 12px;
+            font: inherit;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .dialog-actions button[type="submit"] {
+            background: #007bff;
+            border-color: #007bff;
+            color: #fff;
+        }
+        .dialog-actions button[type="submit"]:disabled {
+            background: #9dc7f5;
+            border-color: #9dc7f5;
+            cursor: default;
+        }
         .text-editor-overlay {
             position: absolute;
             border: 1px solid #007bff;
@@ -339,7 +440,7 @@
         <button id="save-menu-button" aria-haspopup="true" aria-expanded="false"
                 title="Export, import and local saves">Save/Import ▾</button>
         <div class="menu-panel" id="save-menu-panel" role="menu" hidden>
-            <button type="button" role="menuitem" id="export-png">Export PNG</button>
+            <button type="button" role="menuitem" id="save-image">Save Image…</button>
             <button type="button" role="menuitem" id="export-json">Export JSON</button>
             <button type="button" role="menuitem" id="import-json">Import JSON</button>
             <div class="menu-separator"></div>
@@ -364,6 +465,53 @@
 
 <canvas id="canvas" class="drawing-pad pen-mode"></canvas>
 
+<div class="dialog-backdrop" id="save-image-backdrop" hidden>
+    <form class="dialog" id="save-image-dialog" role="dialog" aria-modal="true"
+          aria-labelledby="save-image-title">
+        <h2 id="save-image-title">Save Image</h2>
+
+        <div class="dialog-row">
+            <label for="save-image-name">File name</label>
+            <input type="text" id="save-image-name" value="drawing" autocomplete="off" />
+        </div>
+
+        <div class="dialog-row">
+            <label for="save-image-format">Format</label>
+            <select id="save-image-format">
+                <option value="png">PNG</option>
+                <option value="jpeg">JPEG</option>
+                <option value="webp">WebP</option>
+            </select>
+        </div>
+
+        <div class="dialog-row">
+            <label for="save-image-padding">Padding</label>
+            <span class="dialog-inline">
+                <input type="number" id="save-image-padding" min="0" max="2000" step="1" value="0" />
+                px
+            </span>
+        </div>
+
+        <div class="dialog-row">
+            <label for="save-image-bg-color">Background</label>
+            <span class="dialog-inline">
+                <label class="dialog-inline" for="save-image-transparent">
+                    <input type="checkbox" id="save-image-transparent" checked /> Transparent
+                </label>
+                <input type="color" id="save-image-bg-color" value="#ffffff"
+                       aria-label="Background colour" disabled />
+            </span>
+        </div>
+
+        <p class="dialog-note" id="save-image-note"></p>
+
+        <div class="dialog-actions">
+            <button type="button" id="save-image-cancel">Cancel</button>
+            <button type="submit" id="save-image-confirm">Save</button>
+        </div>
+    </form>
+</div>
+
 <script>
     // Cache loaded images so we don't recreate them every frame
     const imageCache = new Map(); // src -> { img, loaded, error }
@@ -375,7 +523,17 @@
     const clearButton = document.getElementById("clear");
     const undoButton = document.getElementById("undo");
     const redoButton = document.getElementById("redo");
-    const exportPngButton = document.getElementById("export-png");
+    const saveImageButton = document.getElementById("save-image");
+    const saveImageBackdrop = document.getElementById("save-image-backdrop");
+    const saveImageDialog = document.getElementById("save-image-dialog");
+    const saveImageNameInput = document.getElementById("save-image-name");
+    const saveImageFormatSelect = document.getElementById("save-image-format");
+    const saveImagePaddingInput = document.getElementById("save-image-padding");
+    const saveImageTransparentInput = document.getElementById("save-image-transparent");
+    const saveImageBgColorInput = document.getElementById("save-image-bg-color");
+    const saveImageNote = document.getElementById("save-image-note");
+    const saveImageCancelButton = document.getElementById("save-image-cancel");
+    const saveImageConfirmButton = document.getElementById("save-image-confirm");
     const exportJsonButton = document.getElementById("export-json");
     const importJsonButton = document.getElementById("import-json");
     const jsonFileInput = document.getElementById("json-file-input");
@@ -1656,6 +1814,16 @@
         const targetIsEditable = e.target instanceof HTMLInputElement ||
             e.target instanceof HTMLTextAreaElement || e.target?.isContentEditable;
 
+        // The Save Image dialog owns the keyboard while it is open, so canvas
+        // shortcuts cannot fire behind it (Enter submits the form as usual).
+        if (isSaveImageDialogOpen()) {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                closeSaveImageDialog();
+            }
+            return;
+        }
+
         if (e.key === "Escape") {
             e.preventDefault();
             if (isSaveMenuOpen()) {
@@ -1674,8 +1842,11 @@
             applyImageCrop();
         } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
             e.key.toLowerCase() === "s") {
+            // The shortcut is the quick path: straight to PNG, no padding, no
+            // dialog. Use the menu item when those need to change.
             e.preventDefault();
-            exportPngButton.click();
+            closeSaveMenu();
+            saveImage();
         } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
             e.key.toLowerCase() === "a" && !targetIsEditable) {
             e.preventDefault();
@@ -1719,19 +1890,156 @@
         }
     });
 
-    // Export PNG
-    exportPngButton.addEventListener("click", () => {
-        closeSaveMenu();
+    // Save Image
+    const IMAGE_FORMATS = {
+        png: { mime: "image/png", extension: "png", transparency: true },
+        jpeg: { mime: "image/jpeg", extension: "jpg", transparency: false, quality: 0.92 },
+        webp: { mime: "image/webp", extension: "webp", transparency: true, quality: 0.92 },
+    };
+
+    function getImageFormat(name) {
+        return IMAGE_FORMATS[name] || IMAGE_FORMATS.png;
+    }
+
+    // Pixel size of the saved image: the drawing's own bounds at 1:1 zoom, plus
+    // padding on every side. Null when there is nothing drawn.
+    function getSaveImageSize(padding = 0) {
+        const extent = getShapesWorldExtent();
+        if (!extent) return null;
+        const pad = Number.isFinite(padding) ? Math.max(0, padding) : 0;
+        return {
+            extent,
+            pad,
+            width: Math.max(1, Math.ceil(extent.maxX - extent.minX + pad * 2)),
+            height: Math.max(1, Math.ceil(extent.maxY - extent.minY + pad * 2)),
+        };
+    }
+
+    // Redraw every shape cropped to the drawing's bounds and return a data URL.
+    // The visible canvas is reused (and restored straight after) because the
+    // draw helpers all target it directly; nothing repaints part-way through a
+    // task, so the resized canvas never reaches the screen.
+    function renderDrawingToDataUrl({ padding = 0, format = "png", background = null }) {
+        const size = getSaveImageSize(padding);
+        if (!size) return null;
+        const spec = getImageFormat(format);
+
+        const savedCamera = camera;
+        const savedSelection = selectedShapes;
+        const savedWidth = canvas.width;
+        const savedHeight = canvas.height;
+
+        try {
+            selectedShapes = []; // selection outlines are UI, not artwork
+            canvas.width = size.width;
+            canvas.height = size.height;
+            camera = { x: size.extent.minX - size.pad, y: size.extent.minY - size.pad, scale: 1 };
+            render();
+            if (background) {
+                // Fill behind what was just drawn rather than before it, so the
+                // shapes do not have to be rendered twice.
+                ctx.save();
+                ctx.globalCompositeOperation = "destination-over";
+                ctx.fillStyle = background;
+                ctx.fillRect(0, 0, size.width, size.height);
+                ctx.restore();
+            }
+            return canvas.toDataURL(spec.mime, spec.quality);
+        } finally {
+            selectedShapes = savedSelection;
+            camera = savedCamera;
+            canvas.width = savedWidth;
+            canvas.height = savedHeight;
+            render();
+        }
+    }
+
+    function saveImage({ padding = 0, format = "png", background = null, fileName = "drawing" } = {}) {
         commitCurrentTextEditor();
-        // Commit any crop first so its overlay is not baked into the export.
+        // Commit any crop first so its overlay is not baked into the image.
         applyImageCrop();
-        const dataUrl = canvas.toDataURL("image/png");
+
+        const dataUrl = renderDrawingToDataUrl({ padding, format, background });
+        if (!dataUrl) return false;
+
+        const base = (fileName || "").trim().replace(/[\\/:*?"<>|]+/g, "-") || "drawing";
         const link = document.createElement("a");
         link.href = dataUrl;
-        link.download = "drawing.png";
+        link.download = `${base}.${getImageFormat(format).extension}`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        return true;
+    }
+
+    // Remembers the transparency choice across formats that cannot keep it:
+    // picking JPEG forces a solid background, but going back to PNG should not.
+    let saveImageWantsTransparency = true;
+
+    function isSaveImageDialogOpen() {
+        return !saveImageBackdrop.hidden;
+    }
+
+    function getSaveImageBackground() {
+        const spec = getImageFormat(saveImageFormatSelect.value);
+        if (spec.transparency && saveImageTransparentInput.checked) return null;
+        return saveImageBgColorInput.value;
+    }
+
+    function updateSaveImageDialog() {
+        const spec = getImageFormat(saveImageFormatSelect.value);
+        saveImageTransparentInput.disabled = !spec.transparency;
+        saveImageTransparentInput.checked = spec.transparency && saveImageWantsTransparency;
+        saveImageBgColorInput.disabled = saveImageTransparentInput.checked;
+
+        const size = getSaveImageSize(Number(saveImagePaddingInput.value));
+        saveImageConfirmButton.disabled = !size;
+        saveImageNote.textContent = size
+            ? `Output: ${size.width} × ${size.height} px`
+            : "Nothing drawn yet.";
+    }
+
+    function openSaveImageDialog() {
+        closeSaveMenu();
+        // Measure what will actually be saved: text still being typed, and an
+        // open crop, are not part of the drawing until they are committed.
+        commitCurrentTextEditor();
+        applyImageCrop();
+        updateSaveImageDialog();
+        saveImageBackdrop.hidden = false;
+        saveImageNameInput.focus();
+        saveImageNameInput.select();
+    }
+
+    function closeSaveImageDialog() {
+        saveImageBackdrop.hidden = true;
+    }
+
+    saveImageButton.addEventListener("click", openSaveImageDialog);
+    saveImageCancelButton.addEventListener("click", closeSaveImageDialog);
+    saveImageFormatSelect.addEventListener("change", updateSaveImageDialog);
+    saveImagePaddingInput.addEventListener("input", updateSaveImageDialog);
+    saveImageTransparentInput.addEventListener("change", () => {
+        saveImageWantsTransparency = saveImageTransparentInput.checked;
+        updateSaveImageDialog();
+    });
+
+    // A click that starts and ends on the backdrop itself dismisses the dialog;
+    // one that merely drags out of the panel does not.
+    saveImageBackdrop.addEventListener("mousedown", (e) => {
+        if (e.target === saveImageBackdrop) closeSaveImageDialog();
+    });
+
+    saveImageDialog.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const saved = saveImage({
+            padding: Number(saveImagePaddingInput.value),
+            format: saveImageFormatSelect.value,
+            background: getSaveImageBackground(),
+            fileName: saveImageNameInput.value,
+        });
+        if (saved) closeSaveImageDialog();
+        else updateSaveImageDialog();
     });
 
     // Export JSON
