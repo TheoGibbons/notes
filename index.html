@@ -390,7 +390,7 @@
     <div class="divider"></div>
 
     <button data-tool="eraser" title="Eraser (E)">Eraser</button>
-    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add to the selection, Ctrl+A to select all">Select / Move</button>
+    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add to the selection, Ctrl+A to select all, Ctrl+D to duplicate">Select / Move</button>
     <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
 
     <div class="divider"></div>
@@ -706,6 +706,44 @@
         applyImageCrop();
         setSelection([...shapes]);
         switchToSelectTool();
+        updateControlVisibility();
+        render();
+    }
+
+    // How far a duplicate lands from its original, in screen pixels, so the
+    // copy is offset by the same visible amount at any zoom level.
+    const DUPLICATE_OFFSET_SCREEN = 12;
+
+    // Ctrl/Cmd+D. The copies go on top of the stack and become the selection,
+    // so a duplicate can be dragged straight into place.
+    function duplicateSelectedShapes() {
+        if (!selectedShapes.length) return;
+        commitCurrentTextEditor();
+        applyImageCrop();
+
+        // Walk `shapes` rather than the selection so the copies keep the draw
+        // order of their originals instead of the order they were clicked in.
+        const originals = shapes.filter(isShapeSelected);
+        if (!originals.length) return;
+
+        const offset = DUPLICATE_OFFSET_SCREEN / (camera.scale || 1);
+        const copies = cloneShapes(originals);
+        for (const copy of copies) {
+            if (copy.type === "stroke") {
+                for (const point of copy.points) {
+                    point.x += offset;
+                    point.y += offset;
+                }
+            } else {
+                copy.x += offset;
+                copy.y += offset;
+            }
+        }
+
+        shapes.push(...copies);
+        setSelection(copies);
+        switchToSelectTool();
+        pushHistory();
         updateControlVisibility();
         render();
     }
@@ -1870,6 +1908,12 @@
             e.key.toLowerCase() === "a" && !targetIsEditable) {
             e.preventDefault();
             selectAllShapes();
+        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+            e.key.toLowerCase() === "d" && !targetIsEditable) {
+            // Always swallow the key, selection or not, so the browser's
+            // bookmark dialog never opens over the canvas.
+            e.preventDefault();
+            duplicateSelectedShapes();
         } else if (e.key === "Delete" && selectedShapes.length && !targetIsEditable) {
             e.preventDefault();
             cancelImageCrop();
@@ -3747,7 +3791,10 @@
             setSelection([shape]);
             pushHistory();
             switchToSelectTool();
-            render();
+            // Match the spacebar shortcut for the first object added to an
+            // empty scene. Later images keep the current camera unchanged.
+            if (shapes.length === 1) zoomToFitShapes();
+            else render();
         });
     }
 

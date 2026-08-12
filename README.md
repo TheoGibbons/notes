@@ -68,6 +68,9 @@ python tools/make-icons.py
   to **Select/Move**. Dragging any selected item moves the whole group; clicking one
   without dragging narrows the selection back down to that item, and clicking empty
   canvas clears it.
+- **Duplicate:** Press `Ctrl+D` to copy everything currently selected. The copies
+  appear slightly offset, on top of the stack, and become the new selection, so
+  you can drag them straight where you want them.
 - **Delete:** Press `Delete` to remove everything currently selected — `Ctrl+A` then
   `Delete` wipes the drawing. Colour, size, fill, and **Send to Back**/**Bring to
   Front** also apply to the whole selection, skipping items they cannot affect (a
