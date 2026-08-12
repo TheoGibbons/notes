@@ -244,6 +244,9 @@
         #canvas.drawing-pad.arrow-mode {
             cursor: url("./arrow-cursor.svg") 8 8, crosshair;
         }
+        #canvas.drawing-pad.line-mode {
+            cursor: url("./line-cursor.svg") 16 16, crosshair;
+        }
         #canvas.drawing-pad.eraser-mode {
             cursor: url("./eraser-cursor.svg") 7 26, crosshair;
         }
@@ -377,6 +380,7 @@
     <button data-tool="rect" title="Rectangle (R)">Rect</button>
     <button data-tool="circle" title="Circle (C)">Circle</button>
     <button data-tool="arrow" title="Arrow (A)">Arrow</button>
+    <button data-tool="line" title="Line (L)">Line</button>
 
     <div class="divider"></div>
 
@@ -584,6 +588,7 @@
     // rect:   { type: 'rect', x, y, width, height, rotation, strokeColor, fillColor, strokeWidth }
     // circle: { type: 'circle', x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth }
     // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth }
+    // line:   { type: 'line', x, y, length, rotation, strokeColor, strokeWidth }
     // image:  { type: 'image', x, y, width, height, rotation, src, crop? }
     //         crop is the visible part of the source image as fractions of it:
     //         { x, y, width, height } in 0..1, omitted when the whole image shows.
@@ -883,8 +888,8 @@
                 drawRectShape(s, scale);
             } else if (s.type === "circle") {
                 drawCircleShape(s, scale);
-            } else if (s.type === "arrow") {
-                drawArrowShape(s, scale);
+            } else if (isSegmentShape(s)) {
+                drawSegmentShape(s, scale);
             } else if (s.type === "image") {
                 drawImageShape(s, scale);
             }
@@ -992,11 +997,20 @@
         ctx.restore();
     }
 
-    function drawArrowShape(shape, scale) {
+    // Arrows and lines share one geometry — a segment centred on (x, y) with a
+    // length and a rotation — and differ only in the arrowhead.
+    function isSegmentShape(shape) {
+        return !!shape && (shape.type === "arrow" || shape.type === "line");
+    }
+
+    function drawSegmentShape(shape, scale) {
         const len = shape.length ?? 0;
         if (len <= 0) return;
         const strokeWidth = shape.strokeWidth || 2;
-        const headLength = Math.min(Math.max(10, strokeWidth * 4), len * 0.5);
+        const hasHead = shape.type === "arrow";
+        const headLength = hasHead
+            ? Math.min(Math.max(10, strokeWidth * 4), len * 0.5)
+            : 0;
         const half = len / 2;
         drawTransformedShape(shape, scale, () => {
             ctx.strokeStyle = shape.strokeColor || "#000000";
@@ -1006,6 +1020,8 @@
             ctx.moveTo(-half, 0);
             ctx.lineTo(half - headLength, 0);
             ctx.stroke();
+
+            if (!hasHead) return;
 
             // arrowhead at end (right side)
             ctx.beginPath();
@@ -1120,7 +1136,7 @@
             const w = metrics.width + pad * 2;
             const h = metrics.height + pad * 2;
             ctx.strokeRect(sx, sy, w, h);
-        } else if (shape.type === "arrow") {
+        } else if (isSegmentShape(shape)) {
             const s = camera.scale || 1;
             const halfLength = (shape.length || 0) / 2 * s;
             ctx.save();
@@ -1495,7 +1511,7 @@
     // UI: visibility helpers
     function updatePenSizeVisibility() {
         const isSizedDrawingTool = currentTool === "pen" || currentTool === "rect" ||
-            currentTool === "circle" || currentTool === "arrow";
+            currentTool === "circle" || currentTool === "arrow" || currentTool === "line";
         // A mixed selection follows the first shape the control can affect.
         const sized = selectedShapesWith(s => getShapeWidthProperty(s));
         if (currentTool === "select" && sized.length) {
@@ -1519,7 +1535,8 @@
 
     function updateColorVisibility() {
         const isColorDrawingTool = currentTool === "pen" || currentTool === "text" ||
-            currentTool === "rect" || currentTool === "circle" || currentTool === "arrow";
+            currentTool === "rect" || currentTool === "circle" ||
+            currentTool === "arrow" || currentTool === "line";
         const hasColorableSelection = selectedShapes.some(s => getShapeColorProperty(s));
         colorContainer.style.display =
             isColorDrawingTool || hasColorableSelection ? "inline-flex" : "none";
@@ -1580,7 +1597,7 @@
     }
 
     function isTransformableShape(shape) {
-        return shape && (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow" || shape.type === "image");
+        return shape && (shape.type === "rect" || shape.type === "circle" || isSegmentShape(shape) || shape.type === "image");
     }
 
     const toolCursorClasses = {
@@ -1589,6 +1606,7 @@
         rect: "rectangle-mode",
         circle: "circle-mode",
         arrow: "arrow-mode",
+        line: "line-mode",
         eraser: "eraser-mode",
     };
 
@@ -1626,7 +1644,7 @@
     function getShapeColorProperty(shape) {
         if (!shape) return null;
         if (shape.type === "stroke" || shape.type === "text") return "color";
-        if (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow") {
+        if (shape.type === "rect" || shape.type === "circle" || isSegmentShape(shape)) {
             return "strokeColor";
         }
         return null;
@@ -1635,7 +1653,7 @@
     function getShapeWidthProperty(shape) {
         if (!shape) return null;
         if (shape.type === "stroke") return "width";
-        if (shape.type === "rect" || shape.type === "circle" || shape.type === "arrow") {
+        if (shape.type === "rect" || shape.type === "circle" || isSegmentShape(shape)) {
             return "strokeWidth";
         }
         return null;
@@ -1803,6 +1821,7 @@
         e: "eraser",
         h: "hand",
         i: "image",
+        l: "line",
         p: "pen",
         r: "rect",
         t: "text",
@@ -2121,7 +2140,7 @@
                     strokeWidth: positive(shape.strokeWidth, 2),
                 };
             }
-            if (shape.type === "arrow") {
+            if (shape.type === "arrow" || shape.type === "line") {
                 return {
                     ...common,
                     length: positive(shape.length, 10),
@@ -2670,7 +2689,7 @@
                 if (hitTestStroke(s, x, y, radius)) return s;
             } else if (s.type === "text") {
                 if (hitTestText(s, x, y, radius)) return s;
-            } else if (s.type === "rect" || s.type === "image" || s.type === "arrow") {
+            } else if (s.type === "rect" || s.type === "image" || isSegmentShape(s)) {
                 if (hitTestRectLike(s, x, y, radius)) return s;
             } else if (s.type === "circle") {
                 if (hitTestCircleShape(s, x, y, radius)) return s;
@@ -2721,7 +2740,7 @@
         const scale = camera.scale || 1;
         const handleRadiusWorld = 10 / scale;
 
-        if (shape.type === "arrow") {
+        if (isSegmentShape(shape)) {
             const local = worldToLocalForShape(shape, worldX, worldY);
             const halfLength = (shape.length || 0) / 2;
             if (Math.hypot(local.x + halfLength, local.y) <= handleRadiusWorld) {
@@ -2783,8 +2802,8 @@
             const rx = shape.rx ?? shape.radius ?? 0;
             const ry = shape.ry ?? shape.radius ?? 0;
             return { x: shape.x, y: shape.y, width: rx * 2, height: ry * 2 };
-        } else if (shape.type === "rect" || shape.type === "image" || shape.type === "arrow") {
-            if (shape.type === "arrow") {
+        } else if (shape.type === "rect" || shape.type === "image" || isSegmentShape(shape)) {
+            if (isSegmentShape(shape)) {
                 const len = shape.length || 0;
                 const thickness = (shape.strokeWidth || 2) * 4; // visual thickness of selection box
                 return { x: shape.x, y: shape.y, width: len, height: thickness };
@@ -2931,7 +2950,7 @@
                 hit = hitTestStroke(s, x, y, radiusWorld);
             } else if (s.type === "text") {
                 hit = hitTestText(s, x, y, radiusWorld);
-            } else if (s.type === "rect" || s.type === "image" || s.type === "arrow") {
+            } else if (s.type === "rect" || s.type === "image" || isSegmentShape(s)) {
                 hit = hitTestRectLike(s, x, y, radiusWorld);
             } else if (s.type === "circle") {
                 hit = hitTestCircleShape(s, x, y, radiusWorld);
@@ -3033,7 +3052,7 @@
         dragStartWorld = { ...world };
     }
 
-    function resizeArrowEndpoint(shape, bounds, world, minLength) {
+    function resizeSegmentEndpoint(shape, bounds, world, minLength) {
         const halfLength = bounds.width / 2;
         const start = localToWorldForBounds(bounds, -halfLength, 0);
         const end = localToWorldForBounds(bounds, halfLength, 0);
@@ -3083,7 +3102,7 @@
     }
 
     function isShapeDrawingTool(tool) {
-        return tool === "rect" || tool === "circle" || tool === "arrow";
+        return tool === "rect" || tool === "circle" || tool === "arrow" || tool === "line";
     }
 
     function switchToSelectTool() {
@@ -3122,8 +3141,9 @@
                 strokeWidth: penWidth,
             };
         } else {
+            // arrow and line
             draftShape = {
-                type: "arrow",
+                type: tool,
                 x: world.x,
                 y: world.y,
                 length: 0,
@@ -3154,7 +3174,7 @@
         } else if (draftShape.type === "circle") {
             draftShape.rx = Math.abs(dx) / 2;
             draftShape.ry = Math.abs(dy) / 2;
-        } else if (draftShape.type === "arrow") {
+        } else if (isSegmentShape(draftShape)) {
             draftShape.length = Math.hypot(dx, dy);
             draftShape.rotation = Math.atan2(dy, dx);
         }
@@ -3291,9 +3311,9 @@
                 const b = originalBounds;
                 const minSize = 10 / (camera.scale || 1);
 
-                if (selectedShape.type === "arrow" &&
+                if (isSegmentShape(selectedShape) &&
                     (activeHandle === "start" || activeHandle === "end")) {
-                    resizeArrowEndpoint(selectedShape, b, world, minSize);
+                    resizeSegmentEndpoint(selectedShape, b, world, minSize);
                     resizeChanged = true;
                     render();
                     return;
@@ -3407,7 +3427,7 @@
 
         if (isShapeDrawingTool(currentTool) && isDrawing && draftShape) {
             const minimumSize = 3 / (camera.scale || 1);
-            const isLargeEnough = draftShape.type === "arrow"
+            const isLargeEnough = isSegmentShape(draftShape)
                 ? draftShape.length >= minimumSize
                 : draftShape.type === "circle"
                     ? draftShape.rx * 2 >= minimumSize && draftShape.ry * 2 >= minimumSize

@@ -10,7 +10,7 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Pen, Text, Eraser, Select/Move, and Hand/Pan tools
 - Select one item or many, then move, restyle, reorder, or delete them together
 - Insert images and crop them non-destructively
-- Adjustable stroke size (pen, rectangle, circle, arrow), text size, and color
+- Adjustable stroke size (pen, rectangle, circle, arrow, line), text size, and color
 - Zoom with the mouse wheel and pan with the Hand tool or middle mouse button
 - Undo/Redo history
 - Save as a PNG, JPEG or WebP image — trimmed to your drawing, with your choice of
