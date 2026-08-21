@@ -413,6 +413,7 @@
     <div id="pen-size-container" class="inline-group">
         <label class="group-label" for="pen-size">Size:</label>
         <input type="range" id="pen-size" min="1" max="20" value="2" />
+        <input type="number" id="pen-size-value" min="1" step="1" value="2" aria-label="Size value" />
     </div>
 
     <div id="text-size-container" class="inline-group">
@@ -574,6 +575,7 @@
     const fillColorInput = document.getElementById("fill-color");
     const penSizeContainer = document.getElementById("pen-size-container");
     const penSizeInput = document.getElementById("pen-size");
+    const penSizeValueInput = document.getElementById("pen-size-value");
     const textSizeContainer = document.getElementById("text-size-container");
     const textSizeInput = document.getElementById("text-size");
     const textSizeValueInput = document.getElementById("text-size-value");
@@ -594,10 +596,10 @@
     // World / camera state (with zoom)
     let camera = { x: 0, y: 0, scale: 1 };
     const MIN_SCALE = 0.2;
-    const MAX_SCALE = 5;
+    const MAX_SCALE = 20;
 
     // Shapes
-    // stroke: { type: 'stroke', points: [{x,y},...], color, width }
+    // stroke: { type: 'stroke', points: [{x,y},...], color, width, rotation }
     // text:   { type: 'text', x, y, text, fontSize, color, fillColor, rotation }
     // rect:   { type: 'rect', x, y, width, height, rotation, strokeColor, fillColor, strokeWidth }
     // circle: { type: 'circle', x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth }
@@ -867,6 +869,9 @@
         currentTextEditor = editorState;
 
         positionTextEditor(shape, input);
+        // The text is not transformable while its textarea owns interaction.
+        // Re-render now so its rotation handle disappears immediately.
+        render();
 
         const commitAndClose = (push = true) => {
             if (currentTextEditor !== editorState) return;
@@ -964,9 +969,12 @@
         } else if (selectedShapes.length) {
             // Transform handles belong to a single shape, so a multi-selection
             // gets plain outlines plus one box around the whole group.
-            const withHandles = selectedShapes.length === 1 && !isMarqueeSelecting;
+            const isSingleSelection = selectedShapes.length === 1 && !isMarqueeSelecting;
+            const isEditingSelectedText = !!currentTextEditor &&
+                currentTextEditor.shape === selectedShape;
+            const withHandles = isSingleSelection && !isEditingSelectedText;
             for (const s of selectedShapes) drawSelectionOutline(s, scale, withHandles);
-            if (!withHandles) drawMultiSelectionBounds(scale);
+            if (!isSingleSelection) drawMultiSelectionBounds(scale);
         }
 
         if (isMarqueeSelecting) drawMarquee(scale);
@@ -992,17 +1000,27 @@
     // Helpers to draw shapes
     function drawStroke(stroke, scale) {
         const { points, color, width } = stroke;
+        const bounds = getShapeBounds(stroke);
+        if (!bounds || !points.length) return;
+
+        ctx.save();
+        ctx.translate(
+            (bounds.x - camera.x) * scale,
+            (bounds.y - camera.y) * scale,
+        );
+        ctx.rotate(stroke.rotation || 0);
         ctx.strokeStyle = color || "#000000";
         ctx.lineWidth = width * scale;
         ctx.lineCap = "round";
 
         ctx.beginPath();
-        ctx.moveTo((points[0].x - camera.x) * scale, (points[0].y - camera.y) * scale);
+        ctx.moveTo((points[0].x - bounds.x) * scale, (points[0].y - bounds.y) * scale);
         for (let i = 1; i < points.length; i++) {
             const p = points[i];
-            ctx.lineTo((p.x - camera.x) * scale, (p.y - camera.y) * scale);
+            ctx.lineTo((p.x - bounds.x) * scale, (p.y - bounds.y) * scale);
         }
         ctx.stroke();
+        ctx.restore();
     }
 
     function drawTextShape(shape, scale) {
@@ -1190,25 +1208,34 @@
         ctx.strokeStyle = "#007bff";
 
         if (shape.type === "stroke") {
-            const pts = shape.points;
-            if (pts.length === 0) {
+            const bounds = getShapeBounds(shape);
+            if (!bounds) {
                 ctx.restore();
                 return;
             }
-            let minX = pts[0].x, maxX = pts[0].x;
-            let minY = pts[0].y, maxY = pts[0].y;
-            for (const p of pts) {
-                if (p.x < minX) minX = p.x;
-                if (p.x > maxX) maxX = p.x;
-                if (p.y < minY) minY = p.y;
-                if (p.y > maxY) maxY = p.y;
+            const w = bounds.width * scale;
+            const h = bounds.height * scale;
+            const pad = Math.max(4, (shape.width || 0) * scale / 2);
+            ctx.save();
+            ctx.translate(
+                (bounds.x - camera.x) * scale,
+                (bounds.y - camera.y) * scale,
+            );
+            ctx.rotate(shape.rotation || 0);
+            ctx.strokeRect(-w / 2 - pad, -h / 2 - pad, w + pad * 2, h + pad * 2);
+            if (withHandles) {
+                const rotY = -h / 2 - 20;
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(0, -h / 2);
+                ctx.lineTo(0, rotY + 6);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(0, rotY, 6, 0, Math.PI * 2);
+                ctx.fillStyle = "#007bff";
+                ctx.fill();
             }
-            const pad = 4;
-            const sx = (minX - pad - camera.x) * scale;
-            const sy = (minY - pad - camera.y) * scale;
-            const w = (maxX - minX + pad * 2) * scale;
-            const h = (maxY - minY + pad * 2) * scale;
-            ctx.strokeRect(sx, sy, w, h);
+            ctx.restore();
         } else if (shape.type === "text") {
             const fontSizeScreen = shape.fontSize * scale;
             const metrics = measureTextBlock(shape.text, fontSizeScreen);
@@ -1619,6 +1646,7 @@
         if (currentTool === "select" && sized.length) {
             penWidth = sized[0][getShapeWidthProperty(sized[0])];
             penSizeInput.value = Math.min(20, Math.max(1, penWidth)).toString();
+            penSizeValueInput.value = penWidth.toString();
         }
         penSizeContainer.style.display =
             isSizedDrawingTool || sized.length ? "inline-flex" : "none";
@@ -1663,6 +1691,8 @@
             ? "inline-flex"
             : "none";
         fillColorInput.disabled = !fillEnabledInput.checked;
+        const hideUncheckedTextFill = currentTool === "text" && !fillEnabledInput.checked;
+        fillColorInput.style.display = hideUncheckedTextFill ? "none" : "inline-block";
     }
 
     function updateLayerVisibility() {
@@ -1699,7 +1729,7 @@
     }
 
     function isTransformableShape(shape) {
-        return shape && (shape.type === "text" || shape.type === "rect" || shape.type === "circle" ||
+        return shape && (shape.type === "stroke" || shape.type === "text" || shape.type === "rect" || shape.type === "circle" ||
             isSegmentShape(shape) || shape.type === "image");
     }
 
@@ -1790,6 +1820,7 @@
             pushHistory();
             render();
         }
+        updateFillVisibility();
     });
 
     fillColorInput.addEventListener("input", () => {
@@ -1808,21 +1839,42 @@
         if (fillEnabled && selectedShapes.some(isFillableShape)) pushHistory();
     });
 
-    penSizeInput.addEventListener("input", () => {
-        const value = parseInt(penSizeInput.value, 10);
-        penWidth = Number.isFinite(value) ? value : penWidth;
-
+    function applyPenSize(value) {
+        if (!Number.isFinite(value) || value < 1) return false;
+        penWidth = value;
         const sized = selectedShapesWith(s => getShapeWidthProperty(s));
         if (sized.length) {
             sized.forEach(s => { s[getShapeWidthProperty(s)] = penWidth; });
             render();
         }
+        return true;
+    }
+
+    penSizeInput.addEventListener("input", () => {
+        const value = Number(penSizeInput.value);
+        if (applyPenSize(value)) penSizeValueInput.value = value.toString();
     });
 
     penSizeInput.addEventListener("change", () => {
         if (selectedShapes.some(s => getShapeWidthProperty(s))) {
             pushHistory();
         }
+    });
+
+    penSizeValueInput.addEventListener("input", () => {
+        const value = Number(penSizeValueInput.value);
+        if (applyPenSize(value)) {
+            penSizeInput.value = Math.min(20, Math.max(1, value)).toString();
+        }
+    });
+
+    penSizeValueInput.addEventListener("change", () => {
+        const value = Number(penSizeValueInput.value);
+        if (!applyPenSize(value)) {
+            penSizeValueInput.value = penWidth.toString();
+            return;
+        }
+        if (selectedShapes.some(s => getShapeWidthProperty(s))) pushHistory();
     });
 
     function applyTextSize(value) {
@@ -1871,6 +1923,7 @@
     fillEnabledInput.checked = fillEnabled;
     fillColorInput.value = fillColor;
     penSizeInput.value = penWidth.toString();
+    penSizeValueInput.value = penWidth.toString();
     textSizeInput.value = textSize.toString();
     textSizeValueInput.value = textSize.toString();
     updateControlVisibility();
@@ -2245,6 +2298,7 @@
                     points: shape.points.map(point => ({ x: point.x, y: point.y })),
                     color: typeof shape.color === "string" ? shape.color : "#000000",
                     width: positive(shape.width, 2),
+                    rotation: finite(shape.rotation),
                 };
             }
 
@@ -2319,7 +2373,7 @@
             camera: {
                 x: finite(importedCamera.x),
                 y: finite(importedCamera.y),
-                scale: Math.max(0.2, Math.min(5, positive(importedCamera.scale, 1))),
+                scale: Math.max(MIN_SCALE, Math.min(MAX_SCALE, positive(importedCamera.scale, 1))),
             },
         };
     }
@@ -2779,6 +2833,17 @@
     // Hit-testing strokes and text
     function hitTestStroke(stroke, x, y, radiusWorld) {
         const pts = stroke.points;
+        const bounds = getShapeBounds(stroke);
+        if (!bounds) return false;
+        if (stroke.rotation) {
+            const local = worldToLocalForBounds(
+                { ...bounds, rotation: stroke.rotation },
+                x,
+                y,
+            );
+            x = bounds.x + local.x;
+            y = bounds.y + local.y;
+        }
         for (let i = 0; i < pts.length - 1; i++) {
             const p1 = pts[i];
             const p2 = pts[i + 1];
@@ -2883,6 +2948,7 @@
     // Hit-test resize and rotation handles for transformable shapes.
     function getHandleHitTest(shape, worldX, worldY) {
         if (!isTransformableShape(shape)) return null;
+        if (currentTextEditor && currentTextEditor.shape === shape) return null;
         const bounds = getShapeBounds(shape);
         if (!bounds) return null;
 
@@ -2904,8 +2970,8 @@
         const halfW = bounds.width / 2;
         const halfH = bounds.height / 2;
 
-        // Text size has its own toolbar control, so text gets rotation without
-        // corner-resize handles. Box-like shapes retain all four corners.
+        // Text and pen size have toolbar controls, so those shapes get rotation
+        // without corner-resize handles. Box-like shapes retain all four corners.
         const handleLocals = [
             { id: "tl", lx: -halfW, ly: -halfH },
             { id: "tr", lx: halfW,  ly: -halfH },
@@ -2924,7 +2990,7 @@
             };
         }
 
-        if (shape.type !== "text") {
+        if (shape.type !== "text" && shape.type !== "stroke") {
             for (const h of handleLocals) {
                 const p = localToWorld(h.lx, h.ly);
                 const dx = worldX - p.x;
@@ -2950,7 +3016,23 @@
     }
 
     function getShapeBounds(shape) {
-        if (shape.type === "text") {
+        if (shape.type === "stroke") {
+            const points = shape.points || [];
+            if (!points.length) return null;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const point of points) {
+                minX = Math.min(minX, point.x);
+                minY = Math.min(minY, point.y);
+                maxX = Math.max(maxX, point.x);
+                maxY = Math.max(maxY, point.y);
+            }
+            return {
+                x: (minX + maxX) / 2,
+                y: (minY + maxY) / 2,
+                width: maxX - minX,
+                height: maxY - minY,
+            };
+        } else if (shape.type === "text") {
             const metrics = measureTextBlock(shape.text, shape.fontSize || 0);
             return {
                 x: shape.x + metrics.width / 2,
@@ -2978,20 +3060,6 @@
 
     // Axis-aligned world extent of a shape, including rotation and stroke width.
     function getShapeWorldExtent(shape) {
-        if (shape.type === "stroke") {
-            const points = shape.points || [];
-            if (!points.length) return null;
-            const pad = (shape.width || 0) / 2;
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (const p of points) {
-                minX = Math.min(minX, p.x);
-                minY = Math.min(minY, p.y);
-                maxX = Math.max(maxX, p.x);
-                maxY = Math.max(maxY, p.y);
-            }
-            return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
-        }
-
         const bounds = getShapeBounds(shape);
         if (!bounds) return null;
 
@@ -3011,7 +3079,7 @@
             halfH = halfBoxW * sinR + halfBoxH * cosR;
         }
 
-        const pad = (shape.strokeWidth || 0) / 2;
+        const pad = (shape.type === "stroke" ? shape.width : shape.strokeWidth || 0) / 2;
         return {
             minX: bounds.x - halfW - pad,
             minY: bounds.y - halfH - pad,
@@ -3362,6 +3430,7 @@
                 points: [world],
                 color: penColor,
                 width: penWidth,
+                rotation: 0,
             };
             shapes.push(currentStroke);
             clearSelection();
