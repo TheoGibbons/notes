@@ -3,7 +3,7 @@
  * Bump CACHE_VERSION whenever a precached asset changes; the old cache is
  * dropped on activate. index.html is served network-first so a plain reload
  * always picks up a new build when the user is online. */
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const CACHE_NAME = "drawing-pad-" + CACHE_VERSION;
 
 // Relative to the service worker's own URL, so this works whether the app is

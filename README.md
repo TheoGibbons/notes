@@ -17,7 +17,7 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Save as a high-resolution PNG, JPEG or WebP image — trimmed to your drawing,
   with your choice of resolution, padding and background — or export/import JSON,
   from the **Save/Import** menu
-- Local saves stored in your browser, listed in the same menu
+- Local saves stored in your browser, with full-canvas previews from the same menu
 - Installable as an app (PWA) and fully usable offline
 
 ## How to Run
@@ -91,7 +91,7 @@ python tools/make-icons.py
   from the full original.
 - **Add an image:** Click **Image**, paste an image with `Ctrl+V`, or drop an image
   file onto the canvas. Dropped images are placed at the pointer.
-- **Rotate:** Select a rectangle, ellipse, image, or text item and drag the blue
+- **Rotate:** Select a pen stroke, rectangle, ellipse, image, or text item and drag the blue
   rotation handle above it. Drag either endpoint of a line or arrow to resize and
   rotate it. The arrowhead scales along with the **Size** control.
 - **Fill text or shapes:** Choose **Fill** while using the Text, Rectangle, or
@@ -112,7 +112,9 @@ menu open; click again, press `Esc`, or click elsewhere to close it. It holds:
 - **Import JSON** — load a drawing previously exported as JSON.
 - **Local saves** — **Save now…** asks for a name and stores the current drawing
   in this browser; every existing save is listed below it, newest timestamp shown
-  alongside each name. Click one to load it. Automatic saves are listed in blue.
+  alongside each name. Hover over or focus a save to preview it on the full canvas;
+  moving away restores the current drawing, and clicking loads the save. Automatic
+  saves are listed in blue.
 
 Unsaved changes are autosaved before you load or import another drawing, so
 switching drawings never silently discards work.

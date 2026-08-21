@@ -131,7 +131,8 @@
             white-space: nowrap;
         }
         .toolbar .menu-panel button:hover,
-        .toolbar .menu-panel button:focus-visible {
+        .toolbar .menu-panel button:focus-visible,
+        .toolbar .menu-panel button.save-preview-active {
             background: #eaf3ff;
         }
         .toolbar .menu-panel button.autosave-option {
@@ -926,10 +927,10 @@
 
     // Apply camera transform, shape position, and rotation, then invoke a callback
     // that draws in the shape's local coordinate system (0,0 at center, units in world units).
-    function drawTransformedShape(shape, scale, drawLocalCallback) {
-        const s = camera.scale || 1;
-        const sx = (shape.x - camera.x) * s;
-        const sy = (shape.y - camera.y) * s;
+    function drawTransformedShape(shape, scale, drawLocalCallback, viewCamera = camera) {
+        const s = scale || 1;
+        const sx = (shape.x - viewCamera.x) * s;
+        const sy = (shape.y - viewCamera.y) * s;
         const rot = shape.rotation || 0;
         ctx.save();
         ctx.translate(sx, sy);
@@ -942,26 +943,36 @@
     // Rendering
     function render() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const scale = camera.scale || 1;
+        const preview = activeSavePreview;
+        const sceneShapes = preview ? preview.save.shapes || [] : shapes;
+        const sceneCamera = preview
+            ? getFitCameraForShapes(sceneShapes, 64) || preview.save.camera || camera
+            : camera;
+        const scale = sceneCamera.scale || 1;
 
-        for (const s of shapes) {
+        for (const s of sceneShapes) {
             // The image being cropped is drawn by the crop overlay instead, so
             // the dimmed area outside the crop window reads consistently.
-            if (cropSession && s === cropSession.shape) continue;
+            if (!preview && cropSession && s === cropSession.shape) continue;
 
             if (s.type === "stroke") {
-                drawStroke(s, scale);
+                drawStroke(s, scale, sceneCamera);
             } else if (s.type === "text") {
-                drawTextShape(s, scale);
+                drawTextShape(s, scale, sceneCamera);
             } else if (s.type === "rect") {
-                drawRectShape(s, scale);
+                drawRectShape(s, scale, sceneCamera);
             } else if (s.type === "circle") {
-                drawCircleShape(s, scale);
+                drawCircleShape(s, scale, sceneCamera);
             } else if (isSegmentShape(s)) {
-                drawSegmentShape(s, scale);
+                drawSegmentShape(s, scale, sceneCamera);
             } else if (s.type === "image") {
-                drawImageShape(s, scale);
+                drawImageShape(s, scale, sceneCamera);
             }
+        }
+
+        if (preview) {
+            drawSavePreviewLabel(preview.name);
+            return;
         }
 
         if (cropSession) {
@@ -978,6 +989,53 @@
         }
 
         if (isMarqueeSelecting) drawMarquee(scale);
+    }
+
+    function truncateCanvasText(text, maxWidth) {
+        if (ctx.measureText(text).width <= maxWidth) return text;
+        let low = 0;
+        let high = text.length;
+        while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            if (ctx.measureText(`${text.slice(0, middle)}…`).width <= maxWidth) low = middle;
+            else high = middle - 1;
+        }
+        return `${text.slice(0, low)}…`;
+    }
+
+    function drawSavePreviewLabel(name) {
+        const availableWidth = Math.max(40, Math.min(520, canvas.width - 56));
+        const instruction = "Click to load • move away to return";
+
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = "600 14px system-ui, sans-serif";
+        const title = truncateCanvasText(`Previewing: ${name}`, availableWidth);
+        const titleWidth = ctx.measureText(title).width;
+        ctx.font = "12px system-ui, sans-serif";
+        const hint = truncateCanvasText(instruction, availableWidth);
+        const hintWidth = ctx.measureText(hint).width;
+
+        const boxWidth = Math.min(canvas.width - 24, Math.max(180, titleWidth, hintWidth) + 24);
+        const boxHeight = 50;
+        const x = canvas.width / 2;
+        const y = Math.max(boxHeight / 2 + 8, canvas.height - boxHeight / 2 - 12);
+
+        ctx.fillStyle = "rgba(20, 28, 38, 0.88)";
+        ctx.fillRect(x - boxWidth / 2, y - boxHeight / 2, boxWidth, boxHeight);
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - boxWidth / 2 + 0.5, y - boxHeight / 2 + 0.5,
+            boxWidth - 1, boxHeight - 1);
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "600 14px system-ui, sans-serif";
+        ctx.fillText(title, x, y - 9);
+        ctx.fillStyle = "#d9e7f7";
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.fillText(hint, x, y + 11);
+        ctx.restore();
     }
 
     function drawMultiSelectionBounds(scale) {
@@ -998,15 +1056,15 @@
     }
 
     // Helpers to draw shapes
-    function drawStroke(stroke, scale) {
+    function drawStroke(stroke, scale, viewCamera = camera) {
         const { points, color, width } = stroke;
         const bounds = getShapeBounds(stroke);
         if (!bounds || !points.length) return;
 
         ctx.save();
         ctx.translate(
-            (bounds.x - camera.x) * scale,
-            (bounds.y - camera.y) * scale,
+            (bounds.x - viewCamera.x) * scale,
+            (bounds.y - viewCamera.y) * scale,
         );
         ctx.rotate(stroke.rotation || 0);
         ctx.strokeStyle = color || "#000000";
@@ -1023,14 +1081,14 @@
         ctx.restore();
     }
 
-    function drawTextShape(shape, scale) {
+    function drawTextShape(shape, scale, viewCamera = camera) {
         const { x, y, text, fontSize, color, fillColor } = shape;
         ctx.font = `${fontSize * scale}px sans-serif`;
         ctx.textBaseline = "top";
         const metrics = measureTextBlock(text, fontSize * scale);
 
-        const scaledX = (x - camera.x) * scale;
-        const scaledY = (y - camera.y) * scale;
+        const scaledX = (x - viewCamera.x) * scale;
+        const scaledY = (y - viewCamera.y) * scale;
         const halfWidth = metrics.width / 2;
         const halfHeight = metrics.height / 2;
 
@@ -1049,13 +1107,13 @@
         ctx.restore();
     }
 
-    function drawRectShape(shape, scale) {
+    function drawRectShape(shape, scale, viewCamera = camera) {
         const { x, y, width, height, rotation, strokeColor, fillColor, strokeWidth } = shape;
         const halfW = (width / 2) * scale;
         const halfH = (height / 2) * scale;
 
         ctx.save();
-        ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
+        ctx.translate((x - viewCamera.x) * scale, (y - viewCamera.y) * scale);
         ctx.rotate(rotation);
         ctx.strokeStyle = strokeColor || "#000000";
         ctx.fillStyle = fillColor || "transparent";
@@ -1073,10 +1131,10 @@
         ctx.restore();
     }
 
-    function drawCircleShape(shape, scale) {
+    function drawCircleShape(shape, scale, viewCamera = camera) {
         const { x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth } = shape;
         ctx.save();
-        ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
+        ctx.translate((x - viewCamera.x) * scale, (y - viewCamera.y) * scale);
         ctx.rotate(rotation);
         ctx.strokeStyle = strokeColor || "#000000";
         ctx.fillStyle = fillColor || "transparent";
@@ -1105,7 +1163,7 @@
         return Math.min(Math.max(6, strokeWidth * 5), length * 0.5);
     }
 
-    function drawSegmentShape(shape, scale) {
+    function drawSegmentShape(shape, scale, viewCamera = camera) {
         const len = shape.length ?? 0;
         if (len <= 0) return;
         const strokeWidth = shape.strokeWidth || 2;
@@ -1131,7 +1189,7 @@
             ctx.closePath();
             ctx.fillStyle = shape.strokeColor || "#000000";
             ctx.fill();
-        });
+        }, viewCamera);
     }
 
     // Smallest crop we allow, as a fraction of the source image, so the source
@@ -1186,13 +1244,13 @@
         );
     }
 
-    function drawImageShape(shape, scale) {
+    function drawImageShape(shape, scale, viewCamera = camera) {
         const { x, y, width, height, rotation } = shape;
         const img = getLoadedImage(shape);
         if (!img) return;
 
         ctx.save();
-        ctx.translate((x - camera.x) * scale, (y - camera.y) * scale);
+        ctx.translate((x - viewCamera.x) * scale, (y - viewCamera.y) * scale);
         ctx.rotate(rotation);
 
         drawCroppedImage(img, getImageCrop(shape),
@@ -1618,6 +1676,9 @@
     let saveSuccessTimeout = null;
     let saveOperationQueue = Promise.resolve();
     let saveDatabasePromise = null;
+    const SAVE_PREVIEW_DELAY_MS = 200;
+    let pendingSavePreview = null; // { name, item, timer }
+    let activeSavePreview = null;  // { name, item, save, textEditorVisibility? }
     // Declared here because the first refreshSavesMenu() below can already close
     // the Autosaves submenu, long before its handlers are wired up.
     let autosavesMenuPinned = false;
@@ -1994,6 +2055,7 @@
     window.addEventListener("keydown", (e) => {
         const targetIsEditable = e.target instanceof HTMLInputElement ||
             e.target instanceof HTMLTextAreaElement || e.target?.isContentEditable;
+        const targetIsButton = e.target instanceof HTMLButtonElement;
 
         // The Save Image dialog owns the keyboard while it is open, so canvas
         // shortcuts cannot fire behind it (Enter submits the form as usual).
@@ -2018,7 +2080,7 @@
             stopAllInteractions(true);
             switchToSelectTool();
             render();
-        } else if (e.key === "Enter" && cropSession && !targetIsEditable) {
+        } else if (e.key === "Enter" && cropSession && !targetIsEditable && !targetIsButton) {
             e.preventDefault();
             applyImageCrop();
         } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
@@ -2050,7 +2112,7 @@
             }
             updateControlVisibility();
             render();
-        } else if (e.key === " " && !targetIsEditable && !currentTextEditor &&
+        } else if (e.key === " " && !targetIsEditable && !targetIsButton && !currentTextEditor &&
             currentTool !== "text" && !(e.target instanceof HTMLSelectElement) &&
             !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
             e.preventDefault();
@@ -2513,9 +2575,68 @@
         }
     }
 
+    function cancelPendingSavePreview(name = null) {
+        if (!pendingSavePreview || (name && pendingSavePreview.name !== name)) return;
+        clearTimeout(pendingSavePreview.timer);
+        pendingSavePreview = null;
+    }
+
+    function clearSavePreview(name = null) {
+        cancelPendingSavePreview(name);
+        if (!activeSavePreview || (name && activeSavePreview.name !== name)) return;
+
+        const preview = activeSavePreview;
+        activeSavePreview = null;
+        preview.item?.classList.remove("save-preview-active");
+        if (preview.textEditorInput?.isConnected) {
+            preview.textEditorInput.style.visibility = preview.textEditorVisibility;
+        }
+        render();
+    }
+
+    function beginSavePreview(name, item) {
+        const save = saves[name];
+        if (!save || !item.isConnected || !isSaveMenuOpen()) return;
+        if (activeSavePreview?.name === name) return;
+
+        clearSavePreview();
+        const textEditorInput = currentTextEditor?.input || null;
+        activeSavePreview = {
+            name,
+            item,
+            save,
+            textEditorInput,
+            textEditorVisibility: textEditorInput?.style.visibility || "",
+        };
+        item.classList.add("save-preview-active");
+        if (textEditorInput) textEditorInput.style.visibility = "hidden";
+        render();
+    }
+
+    function queueSavePreview(name, item) {
+        cancelPendingSavePreview();
+        if (activeSavePreview?.name === name) return;
+        const timer = setTimeout(() => {
+            pendingSavePreview = null;
+            beginSavePreview(name, item);
+        }, SAVE_PREVIEW_DELAY_MS);
+        pendingSavePreview = { name, item, timer };
+    }
+
+    function clearAutosavePreview() {
+        if (pendingSavePreview && isAutosaveName(pendingSavePreview.name)) {
+            cancelPendingSavePreview(pendingSavePreview.name);
+        }
+        if (activeSavePreview && isAutosaveName(activeSavePreview.name)) {
+            clearSavePreview(activeSavePreview.name);
+        }
+    }
+
     // Lists every save in the menu: autosaves behind their own submenu, named
     // saves directly in the panel.
     function refreshSavesMenu() {
+        // Refreshing replaces the row elements, so end any preview tied to one.
+        clearSavePreview();
         localSavesList.innerHTML = "";
         autosavesList.innerHTML = "";
 
@@ -2552,7 +2673,19 @@
         // Rows are clipped to keep the panel narrow, so the tooltip carries
         // the full text.
         item.title = label;
-        item.addEventListener("click", () => loadNamedDrawing(name));
+        item.setAttribute("aria-label", `${label}. Focus to preview; activate to load.`);
+        item.addEventListener("pointerenter", (event) => {
+            if (event.pointerType === "mouse") queueSavePreview(name, item);
+        });
+        item.addEventListener("pointerleave", (event) => {
+            if (event.pointerType === "mouse") clearSavePreview(name);
+        });
+        item.addEventListener("focus", () => queueSavePreview(name, item));
+        item.addEventListener("blur", () => clearSavePreview(name));
+        item.addEventListener("click", () => {
+            clearSavePreview();
+            loadNamedDrawing(name);
+        });
         return item;
     }
 
@@ -2723,6 +2856,7 @@
 
     function closeSaveMenu() {
         cancelPendingSaveMenuClose();
+        clearSavePreview();
         closeAutosavesMenu();
         saveMenuPinned = false;
         saveMenuPanel.hidden = true;
@@ -2743,6 +2877,7 @@
     }
 
     function closeAutosavesMenu() {
+        clearAutosavePreview();
         autosavesMenuPinned = false;
         autosavesList.hidden = true;
         autosavesButton.setAttribute("aria-expanded", "false");
@@ -3107,14 +3242,14 @@
         return extent;
     }
 
-    // Zoom and pan so every placed shape is visible with a small margin.
-    function zoomToFitShapes() {
-        const extent = getShapesWorldExtent();
-        if (!extent) return; // nothing placed – leave the camera alone
+    // Calculate a camera that shows every supplied shape with a small margin.
+    function getFitCameraForShapes(list = shapes, bottomSpace = 0) {
+        const extent = getShapesWorldExtent(list);
+        if (!extent) return null;
 
         const viewWidth = canvas.width;
-        const viewHeight = canvas.height;
-        if (viewWidth <= 0 || viewHeight <= 0) return;
+        const viewHeight = Math.max(1, canvas.height - Math.max(0, bottomSpace));
+        if (viewWidth <= 0 || viewHeight <= 0) return null;
 
         const margin = Math.min(40, viewWidth / 4, viewHeight / 4); // screen px
         const contentWidth = Math.max(extent.maxX - extent.minX, 1e-6);
@@ -3126,9 +3261,21 @@
         );
         const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, fitScale));
 
-        camera.scale = scale;
-        camera.x = (extent.minX + extent.maxX) / 2 - viewWidth / (2 * scale);
-        camera.y = (extent.minY + extent.maxY) / 2 - viewHeight / (2 * scale);
+        return {
+            scale,
+            x: (extent.minX + extent.maxX) / 2 - viewWidth / (2 * scale),
+            y: (extent.minY + extent.maxY) / 2 - viewHeight / (2 * scale),
+        };
+    }
+
+    // Zoom and pan so every placed shape is visible with a small margin.
+    function zoomToFitShapes() {
+        const fittedCamera = getFitCameraForShapes();
+        if (!fittedCamera) return; // nothing placed – leave the camera alone
+
+        camera.scale = fittedCamera.scale;
+        camera.x = fittedCamera.x;
+        camera.y = fittedCamera.y;
         render();
     }
 
