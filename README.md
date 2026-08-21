@@ -9,12 +9,14 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 ## Features
 - Pen, Text, Eraser, Select/Move, and Hand/Pan tools
 - Select one item or many, then move, restyle, reorder, or delete them together
-- Insert images and crop them non-destructively
+- Insert, paste, or drag and drop images, then crop them non-destructively
 - Adjustable stroke size (pen, rectangle, circle, arrow, line), text size, and color
+- Optional rectangle, ellipse, and text fills; rotate text and geometric shapes
 - Zoom with the mouse wheel and pan with the Hand tool or middle mouse button
 - Undo/Redo history
-- Save as a PNG, JPEG or WebP image — trimmed to your drawing, with your choice of
-  padding and background — or export/import JSON, from the **Save/Import** menu
+- Save as a high-resolution PNG, JPEG or WebP image — trimmed to your drawing,
+  with your choice of resolution, padding and background — or export/import JSON,
+  from the **Save/Import** menu
 - Local saves stored in your browser, listed in the same menu
 - Installable as an app (PWA) and fully usable offline
 
@@ -87,11 +89,18 @@ python tools/make-icons.py
   **Reset** brings the whole picture back. Cropping never discards pixels, so
   cropping again — even after moving, resizing, or rotating the image — starts
   from the full original.
+- **Add an image:** Click **Image**, paste an image with `Ctrl+V`, or drop an image
+  file onto the canvas. Dropped images are placed at the pointer.
+- **Rotate:** Select a rectangle, ellipse, image, or text item and drag the blue
+  rotation handle above it. Drag either endpoint of a line or arrow to resize and
+  rotate it. The arrowhead scales along with the **Size** control.
+- **Fill text or shapes:** Choose **Fill** while using the Text, Rectangle, or
+  Circle tool, or select existing items and change their fill together.
 - **Save an image:** Choose **Save Image…** from the **Save/Import** menu to pick
-  the file name, format (PNG, JPEG or WebP), padding and background colour, or
-  press `Ctrl+S` (`Cmd+S` on macOS) to skip the dialog and save a PNG straight
-  away. Either way the image is cropped to what you have drawn — the empty
-  canvas around it is never included.
+  the file name, format (PNG, JPEG or WebP), resolution, padding and background
+  colour, or press `Ctrl+S` (`Cmd+S` on macOS) to skip the dialog and save a 2×
+  PNG straight away. Either way the image is cropped to what you have drawn —
+  the empty canvas around it is never included.
 - **Clear:** Click **Clear** to wipe the canvas.
 
 ## Save/Import Menu

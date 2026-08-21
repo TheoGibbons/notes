@@ -250,6 +250,9 @@
         #canvas.drawing-pad.eraser-mode {
             cursor: url("./eraser-cursor.svg") 7 26, crosshair;
         }
+        #canvas.image-drop-target {
+            box-shadow: inset 0 0 0 4px #007bff;
+        }
         /* Save Image dialog */
         .dialog-backdrop {
             position: fixed;
@@ -497,6 +500,16 @@
         </div>
 
         <div class="dialog-row">
+            <label for="save-image-scale">Resolution</label>
+            <select id="save-image-scale">
+                <option value="1">1×</option>
+                <option value="2" selected>2× (recommended)</option>
+                <option value="3">3×</option>
+                <option value="4">4×</option>
+            </select>
+        </div>
+
+        <div class="dialog-row">
             <label for="save-image-bg-color">Background</label>
             <span class="dialog-inline">
                 <label class="dialog-inline" for="save-image-transparent">
@@ -533,6 +546,7 @@
     const saveImageNameInput = document.getElementById("save-image-name");
     const saveImageFormatSelect = document.getElementById("save-image-format");
     const saveImagePaddingInput = document.getElementById("save-image-padding");
+    const saveImageScaleSelect = document.getElementById("save-image-scale");
     const saveImageTransparentInput = document.getElementById("save-image-transparent");
     const saveImageBgColorInput = document.getElementById("save-image-bg-color");
     const saveImageNote = document.getElementById("save-image-note");
@@ -584,7 +598,7 @@
 
     // Shapes
     // stroke: { type: 'stroke', points: [{x,y},...], color, width }
-    // text:   { type: 'text', x, y, text, fontSize, color }
+    // text:   { type: 'text', x, y, text, fontSize, color, fillColor, rotation }
     // rect:   { type: 'rect', x, y, width, height, rotation, strokeColor, fillColor, strokeWidth }
     // circle: { type: 'circle', x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth }
     // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth }
@@ -807,13 +821,25 @@
         const fontSizeScreen = shape.fontSize * scale;
         const metrics = measureTextBlock(input.value, fontSizeScreen);
 
-        const sx = (shape.x - camera.x) * scale + rect.left;
-        const sy = (shape.y - camera.y) * scale + rect.top;
+        const rotation = shape.rotation || 0;
+        const halfWidthWorld = metrics.width / (2 * scale);
+        const halfHeightWorld = metrics.height / (2 * scale);
+        const centerX = shape.x + halfWidthWorld;
+        const centerY = shape.y + halfHeightWorld;
+        const cosR = Math.cos(rotation);
+        const sinR = Math.sin(rotation);
+        const topLeftX = centerX - halfWidthWorld * cosR + halfHeightWorld * sinR;
+        const topLeftY = centerY - halfWidthWorld * sinR - halfHeightWorld * cosR;
+        const sx = (topLeftX - camera.x) * scale + rect.left;
+        const sy = (topLeftY - camera.y) * scale + rect.top;
 
         input.style.left = `${sx}px`;
         input.style.top = `${sy}px`;
         input.style.fontSize = `${fontSizeScreen}px`;
         input.style.color = shape.color || "#000000";
+        input.style.backgroundColor = shape.fillColor || "transparent";
+        input.style.transformOrigin = "top left";
+        input.style.transform = `rotate(${rotation}rad)`;
         input.style.width = `${Math.max(60, metrics.width + 12)}px`;
         input.style.height = `${Math.max(fontSizeScreen * 1.2 + 8, metrics.height + 8)}px`;
     }
@@ -980,18 +1006,29 @@
     }
 
     function drawTextShape(shape, scale) {
-        const { x, y, text, fontSize, color } = shape;
-        ctx.fillStyle = color || "#000000";
+        const { x, y, text, fontSize, color, fillColor } = shape;
         ctx.font = `${fontSize * scale}px sans-serif`;
         ctx.textBaseline = "top";
         const metrics = measureTextBlock(text, fontSize * scale);
 
         const scaledX = (x - camera.x) * scale;
         const scaledY = (y - camera.y) * scale;
+        const halfWidth = metrics.width / 2;
+        const halfHeight = metrics.height / 2;
+
+        ctx.save();
+        ctx.translate(scaledX + halfWidth, scaledY + halfHeight);
+        ctx.rotate(shape.rotation || 0);
+        if (fillColor) {
+            ctx.fillStyle = fillColor;
+            ctx.fillRect(-halfWidth, -halfHeight, metrics.width, metrics.height);
+        }
+        ctx.fillStyle = color || "#000000";
 
         metrics.lines.forEach((line, index) => {
-            ctx.fillText(line, scaledX, scaledY + index * metrics.lineHeight);
+            ctx.fillText(line, -halfWidth, -halfHeight + index * metrics.lineHeight);
         });
+        ctx.restore();
     }
 
     function drawRectShape(shape, scale) {
@@ -1041,14 +1078,21 @@
         return !!shape && (shape.type === "arrow" || shape.type === "line");
     }
 
+    function getArrowHeadLength(shape) {
+        if (!shape || shape.type !== "arrow") return 0;
+        const length = Math.max(0, shape.length || 0);
+        const strokeWidth = Math.max(1, shape.strokeWidth || 2);
+        // Keep short arrows usable while making every Size step visibly grow
+        // both the shaft and the arrowhead.
+        return Math.min(Math.max(6, strokeWidth * 5), length * 0.5);
+    }
+
     function drawSegmentShape(shape, scale) {
         const len = shape.length ?? 0;
         if (len <= 0) return;
         const strokeWidth = shape.strokeWidth || 2;
         const hasHead = shape.type === "arrow";
-        const headLength = hasHead
-            ? Math.min(Math.max(10, strokeWidth * 4), len * 0.5)
-            : 0;
+        const headLength = getArrowHeadLength(shape);
         const half = len / 2;
         drawTransformedShape(shape, scale, () => {
             ctx.strokeStyle = shape.strokeColor || "#000000";
@@ -1169,11 +1213,27 @@
             const fontSizeScreen = shape.fontSize * scale;
             const metrics = measureTextBlock(shape.text, fontSizeScreen);
             const pad = 4;
-            const sx = (shape.x - camera.x) * scale - pad;
-            const sy = (shape.y - camera.y) * scale - pad;
             const w = metrics.width + pad * 2;
             const h = metrics.height + pad * 2;
-            ctx.strokeRect(sx, sy, w, h);
+            const cx = (shape.x - camera.x) * scale + metrics.width / 2;
+            const cy = (shape.y - camera.y) * scale + metrics.height / 2;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(shape.rotation || 0);
+            ctx.strokeRect(-w / 2, -h / 2, w, h);
+            if (withHandles) {
+                const rotY = -metrics.height / 2 - 20;
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(0, -metrics.height / 2);
+                ctx.lineTo(0, rotY + 6);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(0, rotY, 6, 0, Math.PI * 2);
+                ctx.fillStyle = "#007bff";
+                ctx.fill();
+            }
+            ctx.restore();
         } else if (isSegmentShape(shape)) {
             const s = camera.scale || 1;
             const halfLength = (shape.length || 0) / 2 * s;
@@ -1245,6 +1305,10 @@
             const rotOffset = 20;
             const rx = 0;
             const ry = -h / 2 * s - rotOffset;
+            ctx.beginPath();
+            ctx.moveTo(0, -h / 2 * s);
+            ctx.lineTo(rx, ry + 6);
+            ctx.stroke();
             ctx.beginPath();
             ctx.arc(rx, ry, 6, 0, Math.PI * 2);
             ctx.fillStyle = "#007bff";
@@ -1581,11 +1645,11 @@
     }
 
     function isFillableShape(shape) {
-        return shape && (shape.type === "rect" || shape.type === "circle");
+        return shape && (shape.type === "rect" || shape.type === "circle" || shape.type === "text");
     }
 
     function updateFillVisibility() {
-        const isFillDrawingTool = currentTool === "rect" || currentTool === "circle";
+        const isFillDrawingTool = currentTool === "rect" || currentTool === "circle" || currentTool === "text";
         const fillable = selectedShapesWith(isFillableShape);
         if (currentTool === "select" && fillable.length) {
             fillEnabled = !!fillable[0].fillColor;
@@ -1635,7 +1699,8 @@
     }
 
     function isTransformableShape(shape) {
-        return shape && (shape.type === "rect" || shape.type === "circle" || isSegmentShape(shape) || shape.type === "image");
+        return shape && (shape.type === "text" || shape.type === "rect" || shape.type === "circle" ||
+            isSegmentShape(shape) || shape.type === "image");
     }
 
     const toolCursorClasses = {
@@ -1719,6 +1784,9 @@
         const fillable = selectedShapesWith(isFillableShape);
         if (fillable.length) {
             fillable.forEach(s => { s.fillColor = fillEnabled ? fillColor : null; });
+            if (currentTextEditor && fillable.includes(currentTextEditor.shape)) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+            }
             pushHistory();
             render();
         }
@@ -1729,6 +1797,9 @@
         const fillable = fillEnabled ? selectedShapesWith(isFillableShape) : [];
         if (fillable.length) {
             fillable.forEach(s => { s.fillColor = fillColor; });
+            if (currentTextEditor && fillable.includes(currentTextEditor.shape)) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+            }
             render();
         }
     });
@@ -1954,27 +2025,36 @@
     });
 
     // Save Image
+    const DEFAULT_IMAGE_EXPORT_SCALE = 2;
     const IMAGE_FORMATS = {
         png: { mime: "image/png", extension: "png", transparency: true },
-        jpeg: { mime: "image/jpeg", extension: "jpg", transparency: false, quality: 0.92 },
-        webp: { mime: "image/webp", extension: "webp", transparency: true, quality: 0.92 },
+        jpeg: { mime: "image/jpeg", extension: "jpg", transparency: false, quality: 0.98 },
+        webp: { mime: "image/webp", extension: "webp", transparency: true, quality: 0.98 },
     };
 
     function getImageFormat(name) {
         return IMAGE_FORMATS[name] || IMAGE_FORMATS.png;
     }
 
-    // Pixel size of the saved image: the drawing's own bounds at 1:1 zoom, plus
-    // padding on every side. Null when there is nothing drawn.
-    function getSaveImageSize(padding = 0) {
+    function getImageExportScale(value) {
+        const scale = Number(value);
+        return Number.isFinite(scale) ? Math.max(1, Math.min(4, scale)) : DEFAULT_IMAGE_EXPORT_SCALE;
+    }
+
+    // Pixel size of the saved image: the drawing's own bounds at the requested
+    // resolution, plus padding on every side. Padding remains an output-pixel
+    // measurement, so asking for 20 px still produces 20 px at every scale.
+    function getSaveImageSize(padding = 0, scale = DEFAULT_IMAGE_EXPORT_SCALE) {
         const extent = getShapesWorldExtent();
         if (!extent) return null;
         const pad = Number.isFinite(padding) ? Math.max(0, padding) : 0;
+        const outputScale = getImageExportScale(scale);
         return {
             extent,
             pad,
-            width: Math.max(1, Math.ceil(extent.maxX - extent.minX + pad * 2)),
-            height: Math.max(1, Math.ceil(extent.maxY - extent.minY + pad * 2)),
+            scale: outputScale,
+            width: Math.max(1, Math.ceil((extent.maxX - extent.minX) * outputScale + pad * 2)),
+            height: Math.max(1, Math.ceil((extent.maxY - extent.minY) * outputScale + pad * 2)),
         };
     }
 
@@ -1982,8 +2062,13 @@
     // The visible canvas is reused (and restored straight after) because the
     // draw helpers all target it directly; nothing repaints part-way through a
     // task, so the resized canvas never reaches the screen.
-    function renderDrawingToDataUrl({ padding = 0, format = "png", background = null }) {
-        const size = getSaveImageSize(padding);
+    function renderDrawingToDataUrl({
+        padding = 0,
+        scale = DEFAULT_IMAGE_EXPORT_SCALE,
+        format = "png",
+        background = null,
+    }) {
+        const size = getSaveImageSize(padding, scale);
         if (!size) return null;
         const spec = getImageFormat(format);
 
@@ -1996,7 +2081,13 @@
             selectedShapes = []; // selection outlines are UI, not artwork
             canvas.width = size.width;
             canvas.height = size.height;
-            camera = { x: size.extent.minX - size.pad, y: size.extent.minY - size.pad, scale: 1 };
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
+            camera = {
+                x: size.extent.minX - size.pad / size.scale,
+                y: size.extent.minY - size.pad / size.scale,
+                scale: size.scale,
+            };
             render();
             if (background) {
                 // Fill behind what was just drawn rather than before it, so the
@@ -2017,12 +2108,18 @@
         }
     }
 
-    function saveImage({ padding = 0, format = "png", background = null, fileName = "drawing" } = {}) {
+    function saveImage({
+        padding = 0,
+        scale = DEFAULT_IMAGE_EXPORT_SCALE,
+        format = "png",
+        background = null,
+        fileName = "drawing",
+    } = {}) {
         commitCurrentTextEditor();
         // Commit any crop first so its overlay is not baked into the image.
         applyImageCrop();
 
-        const dataUrl = renderDrawingToDataUrl({ padding, format, background });
+        const dataUrl = renderDrawingToDataUrl({ padding, scale, format, background });
         if (!dataUrl) return false;
 
         const base = (fileName || "").trim().replace(/[\\/:*?"<>|]+/g, "-") || "drawing";
@@ -2055,10 +2152,13 @@
         saveImageTransparentInput.checked = spec.transparency && saveImageWantsTransparency;
         saveImageBgColorInput.disabled = saveImageTransparentInput.checked;
 
-        const size = getSaveImageSize(Number(saveImagePaddingInput.value));
+        const size = getSaveImageSize(
+            Number(saveImagePaddingInput.value),
+            Number(saveImageScaleSelect.value),
+        );
         saveImageConfirmButton.disabled = !size;
         saveImageNote.textContent = size
-            ? `Output: ${size.width} × ${size.height} px`
+            ? `Output: ${size.width} × ${size.height} px at ${size.scale}×`
             : "Nothing drawn yet.";
     }
 
@@ -2082,6 +2182,7 @@
     saveImageCancelButton.addEventListener("click", closeSaveImageDialog);
     saveImageFormatSelect.addEventListener("change", updateSaveImageDialog);
     saveImagePaddingInput.addEventListener("input", updateSaveImageDialog);
+    saveImageScaleSelect.addEventListener("change", updateSaveImageDialog);
     saveImageTransparentInput.addEventListener("change", () => {
         saveImageWantsTransparency = saveImageTransparentInput.checked;
         updateSaveImageDialog();
@@ -2097,6 +2198,7 @@
         e.preventDefault();
         const saved = saveImage({
             padding: Number(saveImagePaddingInput.value),
+            scale: Number(saveImageScaleSelect.value),
             format: saveImageFormatSelect.value,
             background: getSaveImageBackground(),
             fileName: saveImageNameInput.value,
@@ -2155,6 +2257,8 @@
                     text: shape.text,
                     fontSize: positive(shape.fontSize, 20),
                     color: typeof shape.color === "string" ? shape.color : "#000000",
+                    fillColor: typeof shape.fillColor === "string" ? shape.fillColor : null,
+                    rotation: finite(shape.rotation),
                 };
             }
 
@@ -2686,15 +2790,16 @@
     }
 
     function hitTestText(shape, x, y, radiusWorld) {
-        const metrics = measureTextBlock(shape.text, shape.fontSize);
-        const left = shape.x;
-        const top = shape.y;
-        const right = shape.x + metrics.width;
-        const bottom = shape.y + metrics.height;
-
-        return x >= left - radiusWorld && x <= right + radiusWorld &&
-            y >= top - radiusWorld && y <= bottom + radiusWorld;
-
+        const bounds = getShapeBounds(shape);
+        if (!bounds) return false;
+        const local = worldToLocalForBounds(
+            { ...bounds, rotation: shape.rotation || 0 },
+            x,
+            y,
+        );
+        const pad = radiusWorld || 0;
+        return Math.abs(local.x) <= bounds.width / 2 + pad &&
+            Math.abs(local.y) <= bounds.height / 2 + pad;
     }
 
     // Hit-test axis-aligned or rotated rect-like shapes (rect/image/arrow) by
@@ -2799,7 +2904,8 @@
         const halfW = bounds.width / 2;
         const halfH = bounds.height / 2;
 
-        // Check resize handles in world space using a fixed pixel radius
+        // Text size has its own toolbar control, so text gets rotation without
+        // corner-resize handles. Box-like shapes retain all four corners.
         const handleLocals = [
             { id: "tl", lx: -halfW, ly: -halfH },
             { id: "tr", lx: halfW,  ly: -halfH },
@@ -2813,17 +2919,19 @@
 
         function localToWorld(lx, ly) {
             return {
-                x: shape.x + (lx * cosR - ly * sinR),
-                y: shape.y + (lx * sinR + ly * cosR),
+                x: bounds.x + (lx * cosR - ly * sinR),
+                y: bounds.y + (lx * sinR + ly * cosR),
             };
         }
 
-        for (const h of handleLocals) {
-            const p = localToWorld(h.lx, h.ly);
-            const dx = worldX - p.x;
-            const dy = worldY - p.y;
-            if (dx * dx + dy * dy <= handleRadiusWorld * handleRadiusWorld) {
-                return { type: "resize", id: h.id };
+        if (shape.type !== "text") {
+            for (const h of handleLocals) {
+                const p = localToWorld(h.lx, h.ly);
+                const dx = worldX - p.x;
+                const dy = worldY - p.y;
+                if (dx * dx + dy * dy <= handleRadiusWorld * handleRadiusWorld) {
+                    return { type: "resize", id: h.id };
+                }
             }
         }
 
@@ -2842,14 +2950,25 @@
     }
 
     function getShapeBounds(shape) {
-        if (shape.type === "circle") {
+        if (shape.type === "text") {
+            const metrics = measureTextBlock(shape.text, shape.fontSize || 0);
+            return {
+                x: shape.x + metrics.width / 2,
+                y: shape.y + metrics.height / 2,
+                width: metrics.width,
+                height: metrics.height,
+            };
+        } else if (shape.type === "circle") {
             const rx = shape.rx ?? shape.radius ?? 0;
             const ry = shape.ry ?? shape.radius ?? 0;
             return { x: shape.x, y: shape.y, width: rx * 2, height: ry * 2 };
         } else if (shape.type === "rect" || shape.type === "image" || isSegmentShape(shape)) {
             if (isSegmentShape(shape)) {
                 const len = shape.length || 0;
-                const thickness = (shape.strokeWidth || 2) * 4; // visual thickness of selection box
+                const thickness = Math.max(
+                    (shape.strokeWidth || 2) * 4,
+                    getArrowHeadLength(shape),
+                ); // includes the arrowhead in selection/export bounds
                 return { x: shape.x, y: shape.y, width: len, height: thickness };
             }
             return { x: shape.x, y: shape.y, width: shape.width || 0, height: shape.height || 0 };
@@ -2871,17 +2990,6 @@
                 maxY = Math.max(maxY, p.y);
             }
             return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
-        }
-
-        if (shape.type === "text") {
-            // Text is anchored at its top-left corner and is never rotated.
-            const metrics = measureTextBlock(shape.text, shape.fontSize || 0);
-            return {
-                minX: shape.x,
-                minY: shape.y,
-                maxX: shape.x + metrics.width,
-                maxY: shape.y + metrics.height,
-            };
         }
 
         const bounds = getShapeBounds(shape);
@@ -2974,8 +3082,8 @@
         const cosR = Math.cos(rot);
         const sinR = Math.sin(rot);
 
-        const wx = shape.x + (localX * cosR - localY * sinR);
-        const wy = shape.y + (localX * sinR + localY * cosR);
+        const wx = bounds.x + (localX * cosR - localY * sinR);
+        const wy = bounds.y + (localX * sinR + localY * cosR);
 
         const radiusWorld = 6 / scale; // 6px circle in screen space
         return { x: wx, y: wy, radiusWorld };
@@ -3135,10 +3243,12 @@
     }
 
     function beginRotate(shape, world) {
+        const bounds = getShapeBounds(shape);
+        if (!bounds) return;
         isRotating = true;
         activeHandle = "rot";
         rotateChanged = false;
-        rotationCenter = { x: shape.x, y: shape.y };
+        rotationCenter = { x: bounds.x, y: bounds.y };
         const dx = world.x - rotationCenter.x;
         const dy = world.y - rotationCenter.y;
         rotationStartAngle = Math.atan2(dy, dx);
@@ -3315,6 +3425,8 @@
                 text: "",
                 fontSize: textSize,
                 color: penColor,
+                fillColor: fillEnabled ? fillColor : null,
+                rotation: 0,
             };
             shapes.push(shape);
             setSelection([shape]);
@@ -3759,7 +3871,7 @@
         img.src = src;
     }
 
-    function addImageSource(src) {
+    function addImageSource(src, placementWorld = null) {
         loadImageSource(src, (img) => {
             applyImageCrop();
             const baseScale = camera.scale || 1;
@@ -3780,8 +3892,12 @@
 
             const shape = {
                 type: "image",
-                x: camera.x + (canvas.width / 2) / baseScale,
-                y: camera.y + (canvas.height / 2) / baseScale,
+                x: Number.isFinite(placementWorld?.x)
+                    ? placementWorld.x
+                    : camera.x + (canvas.width / 2) / baseScale,
+                y: Number.isFinite(placementWorld?.y)
+                    ? placementWorld.y
+                    : camera.y + (canvas.height / 2) / baseScale,
                 width,
                 height,
                 rotation: 0,
@@ -3798,10 +3914,10 @@
         });
     }
 
-    function addImageBlob(blob) {
+    function addImageBlob(blob, placementWorld = null) {
         if (!blob || !blob.type.startsWith("image/")) return;
         const reader = new FileReader();
-        reader.onload = () => addImageSource(reader.result);
+        reader.onload = () => addImageSource(reader.result, placementWorld);
         reader.readAsDataURL(blob);
     }
 
@@ -3827,6 +3943,36 @@
 
         e.preventDefault();
         addImageBlob(imageFile);
+    });
+
+    function getDraggedImageFile(dataTransfer) {
+        return Array.from(dataTransfer?.files || [])
+            .find(file => file.type.startsWith("image/")) || null;
+    }
+
+    function hasDraggedImage(dataTransfer) {
+        const items = Array.from(dataTransfer?.items || []);
+        return items.some(item => item.kind === "file" && item.type.startsWith("image/")) ||
+            !!getDraggedImageFile(dataTransfer);
+    }
+
+    canvas.addEventListener("dragover", (e) => {
+        if (!hasDraggedImage(e.dataTransfer)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        canvas.classList.add("image-drop-target");
+    });
+
+    canvas.addEventListener("dragleave", () => {
+        canvas.classList.remove("image-drop-target");
+    });
+
+    canvas.addEventListener("drop", (e) => {
+        canvas.classList.remove("image-drop-target");
+        const imageFile = getDraggedImageFile(e.dataTransfer);
+        if (!imageFile) return;
+        e.preventDefault();
+        addImageBlob(imageFile, screenToWorld(e.clientX, e.clientY));
     });
 
     // Initial history snapshot
