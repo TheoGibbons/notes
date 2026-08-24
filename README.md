@@ -73,6 +73,9 @@ python tools/make-icons.py
 - **Duplicate:** Press `Ctrl+D` to copy everything currently selected. The copies
   appear slightly offset, on top of the stack, and become the new selection, so
   you can drag them straight where you want them.
+- **Copy as an image:** Press `Ctrl+C` to copy the current selection to the
+  clipboard as a tightly cropped, transparent PNG. A selection can contain one
+  image or any mix of strokes, text, shapes, and images.
 - **Delete:** Press `Delete` to remove everything currently selected — `Ctrl+A` then
   `Delete` wipes the drawing. Colour, size, fill, and **Send to Back**/**Bring to
   Front** also apply to the whole selection, skipping items they cannot affect (a
@@ -83,12 +86,13 @@ python tools/make-icons.py
   on screen (ignored while the Text tool is active or you are editing text).
 - **Undo/Redo:** Use the toolbar buttons or `Ctrl+Z` / `Ctrl+Y`.
 - **Crop an image:** Select an image and click **Crop** (or double-click the
-  image). Drag the corner and edge handles to set the crop window, or drag
-  inside it to slide the window over the picture. **Apply** (or `Enter`, or a
-  click outside) keeps the crop, **Cancel** (or `Esc`) discards it, and
-  **Reset** brings the whole picture back. Cropping never discards pixels, so
-  cropping again — even after moving, resizing, or rotating the image — starts
-  from the full original.
+  image). Drag a rectangle over the image to draw a new crop window, drag its
+  corner or edge handles to resize it, or drag inside it to slide it over the
+  picture. `Shift`-drag draws a replacement window from inside an existing one.
+  **Apply** (or `Enter`, or a click outside) keeps the crop, **Cancel** (or `Esc`)
+  discards it, and **Reset** brings the whole picture back. Cropping never
+  discards pixels, so cropping again — even after moving, resizing, or rotating
+  the image — starts from the full original.
 - **Add an image:** Click **Image**, paste an image with `Ctrl+V`, or drop an image
   file onto the canvas. Dropped images are placed at the pointer.
 - **Rotate:** Select a pen stroke, rectangle, ellipse, image, or text item and drag the blue

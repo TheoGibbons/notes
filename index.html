@@ -394,7 +394,7 @@
     <div class="divider"></div>
 
     <button data-tool="eraser" title="Eraser (E)">Eraser</button>
-    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add to the selection, Ctrl+A to select all, Ctrl+D to duplicate">Select / Move</button>
+    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C to copy as an image, Ctrl+D to duplicate">Select / Move</button>
     <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
 
     <div class="divider"></div>
@@ -431,7 +431,7 @@
 
     <div id="crop-container" class="inline-group">
         <span class="group-label">Image:</span>
-        <button id="crop-image" title="Crop the selected image (or double-click it)">Crop</button>
+        <button id="crop-image" title="Crop the selected image (or double-click it); drag over the image to draw a crop box">Crop</button>
         <button id="crop-apply" title="Apply crop (Enter)">Apply</button>
         <button id="crop-reset" title="Restore the whole image">Reset</button>
         <button id="crop-cancel" title="Cancel crop (Esc)">Cancel</button>
@@ -771,9 +771,11 @@
     // `full`/`rect`/`initialRect` are { left, top, right, bottom } boxes in the
     // shape's local (rotated, world-scaled) space, centred on `origin`.
     let cropSession = null;
-    let cropDragHandle = null;   // 'tl','t','tr','r','br','b','bl','l','move'
+    let cropDragHandle = null;   // 'tl','t','tr','r','br','b','bl','l','move','draw'
     let cropDragStartLocal = null;
     let cropDragStartRect = null;
+    let cropDrawActivated = false;
+    let cropDrawClickApplies = false;
 
     let dragStartWorld = null;
     let originalShapeData = null;
@@ -1412,6 +1414,7 @@
 
     const CROP_HANDLE_SCREEN_SIZE = 9;   // drawn side length, in screen px
     const CROP_HANDLE_HIT_RADIUS = 12;   // grab radius, in screen px
+    const CROP_DRAW_THRESHOLD_SCREEN = 4;
 
     function getCropFrame(session) {
         return {
@@ -1470,6 +1473,8 @@
         cropDragHandle = null;
         cropDragStartLocal = null;
         cropDragStartRect = null;
+        cropDrawActivated = false;
+        cropDrawClickApplies = false;
         updateControlVisibility();
         updateCanvasCursor();
     }
@@ -1558,12 +1563,62 @@
         cropDragHandle = handle;
         cropDragStartLocal = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
         cropDragStartRect = { ...cropSession.rect };
+        cropDrawActivated = false;
+        cropDrawClickApplies = false;
+    }
+
+    function pointIsInsideRect(point, rect) {
+        return point.x >= rect.left && point.x <= rect.right &&
+            point.y >= rect.top && point.y <= rect.bottom;
+    }
+
+    function clampPointToRect(point, rect) {
+        return {
+            x: Math.min(rect.right, Math.max(rect.left, point.x)),
+            y: Math.min(rect.bottom, Math.max(rect.top, point.y)),
+        };
+    }
+
+    // Start a fresh crop window at the pointer. We wait for a few screen pixels
+    // of movement before replacing the existing window, so an ordinary click
+    // never collapses it to a tiny rectangle.
+    function beginCropDraw(world, clickApplies = false) {
+        const local = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
+        cropDragHandle = "draw";
+        cropDragStartLocal = clampPointToRect(local, cropSession.full);
+        cropDragStartRect = { ...cropSession.rect };
+        cropDrawActivated = false;
+        cropDrawClickApplies = clickApplies;
+    }
+
+    function cropAxisFromDrag(anchor, pointer, minimum, maximum, minSize) {
+        let low = Math.min(anchor, pointer);
+        let high = Math.max(anchor, pointer);
+
+        if (high - low < minSize) {
+            if (pointer < anchor) {
+                low = Math.max(minimum, anchor - minSize);
+                high = anchor;
+            } else {
+                low = anchor;
+                high = Math.min(maximum, anchor + minSize);
+            }
+
+            // If the anchor is too close to that edge, grow toward the other
+            // side instead while keeping the box inside the source image.
+            if (high - low < minSize) {
+                low = Math.max(minimum, high - minSize);
+                high = Math.min(maximum, low + minSize);
+            }
+        }
+
+        return { low, high };
     }
 
     function updateCropDrag(world) {
         if (!cropSession || !cropDragHandle) return;
 
-        const local = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
+        let local = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
         const dx = local.x - cropDragStartLocal.x;
         const dy = local.y - cropDragStartLocal.y;
         const start = cropDragStartRect;
@@ -1575,7 +1630,26 @@
         );
         const next = { ...start };
 
-        if (cropDragHandle === "move") {
+        if (cropDragHandle === "draw") {
+            local = clampPointToRect(local, full);
+            const drawDx = local.x - cropDragStartLocal.x;
+            const drawDy = local.y - cropDragStartLocal.y;
+            const threshold = CROP_DRAW_THRESHOLD_SCREEN / (camera.scale || 1);
+
+            if (!cropDrawActivated && Math.hypot(drawDx, drawDy) < threshold) return;
+            cropDrawActivated = true;
+
+            const horizontal = cropAxisFromDrag(
+                cropDragStartLocal.x, local.x, full.left, full.right, minSize
+            );
+            const vertical = cropAxisFromDrag(
+                cropDragStartLocal.y, local.y, full.top, full.bottom, minSize
+            );
+            next.left = horizontal.low;
+            next.right = horizontal.high;
+            next.top = vertical.low;
+            next.bottom = vertical.high;
+        } else if (cropDragHandle === "move") {
             const width = start.right - start.left;
             const height = start.bottom - start.top;
             next.left = Math.min(full.right - width, Math.max(full.left, start.left + dx));
@@ -2095,6 +2169,10 @@
             e.preventDefault();
             selectAllShapes();
         } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+            e.key.toLowerCase() === "c" && !targetIsEditable && selectedShapes.length) {
+            e.preventDefault();
+            copySelectedShapesToClipboard();
+        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
             e.key.toLowerCase() === "d" && !targetIsEditable) {
             // Always swallow the key, selection or not, so the browser's
             // bookmark dialog never opens over the canvas.
@@ -2159,8 +2237,8 @@
     // Pixel size of the saved image: the drawing's own bounds at the requested
     // resolution, plus padding on every side. Padding remains an output-pixel
     // measurement, so asking for 20 px still produces 20 px at every scale.
-    function getSaveImageSize(padding = 0, scale = DEFAULT_IMAGE_EXPORT_SCALE) {
-        const extent = getShapesWorldExtent();
+    function getSaveImageSize(padding = 0, scale = DEFAULT_IMAGE_EXPORT_SCALE, shapeList = shapes) {
+        const extent = getShapesWorldExtent(shapeList);
         if (!extent) return null;
         const pad = Number.isFinite(padding) ? Math.max(0, padding) : 0;
         const outputScale = getImageExportScale(scale);
@@ -2182,18 +2260,23 @@
         scale = DEFAULT_IMAGE_EXPORT_SCALE,
         format = "png",
         background = null,
+        shapeList = shapes,
     }) {
-        const size = getSaveImageSize(padding, scale);
+        const size = getSaveImageSize(padding, scale, shapeList);
         if (!size) return null;
         const spec = getImageFormat(format);
 
         const savedCamera = camera;
+        const savedShapes = shapes;
         const savedSelection = selectedShapes;
+        const savedPreview = activeSavePreview;
         const savedWidth = canvas.width;
         const savedHeight = canvas.height;
 
         try {
+            shapes = shapeList;
             selectedShapes = []; // selection outlines are UI, not artwork
+            activeSavePreview = null;
             canvas.width = size.width;
             canvas.height = size.height;
             ctx.imageSmoothingEnabled = true;
@@ -2216,10 +2299,53 @@
             return canvas.toDataURL(spec.mime, spec.quality);
         } finally {
             selectedShapes = savedSelection;
+            activeSavePreview = savedPreview;
+            shapes = savedShapes;
             camera = savedCamera;
             canvas.width = savedWidth;
             canvas.height = savedHeight;
             render();
+        }
+    }
+
+    function dataUrlToBlob(dataUrl) {
+        const comma = dataUrl.indexOf(",");
+        const header = dataUrl.slice(0, comma);
+        const mimeMatch = header.match(/^data:([^;,]+)/);
+        const binary = atob(dataUrl.slice(comma + 1));
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new Blob([bytes], { type: mimeMatch?.[1] || "image/png" });
+    }
+
+    function copySelectedShapesToClipboard() {
+        commitCurrentTextEditor();
+        // A pending crop is part of what the user sees and expects to copy.
+        applyImageCrop();
+
+        const shapeList = shapes.filter(isShapeSelected);
+        if (!shapeList.length) return false;
+
+        if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+            alert("This browser does not support copying images to the clipboard.");
+            return false;
+        }
+
+        try {
+            const dataUrl = renderDrawingToDataUrl({ format: "png", shapeList });
+            if (!dataUrl) return false;
+            const blob = dataUrlToBlob(dataUrl);
+            navigator.clipboard.write([
+                new ClipboardItem({ "image/png": blob }),
+            ]).catch(error => {
+                console.error("Could not copy the selection to the clipboard", error);
+                alert("The selection could not be copied to the clipboard.");
+            });
+            return true;
+        } catch (error) {
+            console.error("Could not copy the selection to the clipboard", error);
+            alert("The selection could not be copied to the clipboard.");
+            return false;
         }
     }
 
@@ -3560,13 +3686,32 @@
         }));
     }
 
-    function handlePrimaryDownAtWorld(world, screenX, screenY, addToSelection = false) {
-        // While cropping, the canvas belongs to the crop session: drag a handle
-        // or the window itself, and a click anywhere else commits the crop.
+    function handlePrimaryDownAtWorld(
+        world, screenX, screenY, addToSelection = false, forceCropDraw = false
+    ) {
+        // While cropping, the canvas belongs to the crop session. Handles resize
+        // the crop, its interior moves it, and dragging elsewhere on the source
+        // draws a fresh crop window. A full-size window cannot move, so dragging
+        // inside it draws immediately. Shift-drag redraws from any image point.
         if (cropSession) {
             const handle = getCropHandleAtWorld(world);
-            if (handle) beginCropDrag(handle, world);
-            else applyImageCrop();
+            const local = worldToLocalForBounds(getCropFrame(cropSession), world.x, world.y);
+            const isInsideSource = pointIsInsideRect(local, cropSession.full);
+
+            if (handle && handle !== "move") {
+                beginCropDrag(handle, world);
+            } else if (isInsideSource && (forceCropDraw ||
+                (handle === "move" && cropRectsMatch(cropSession.rect, cropSession.full)))) {
+                beginCropDraw(world);
+            } else if (handle === "move") {
+                beginCropDrag(handle, world);
+            } else if (isInsideSource) {
+                // Preserve the existing click-outside-to-apply shortcut when
+                // this never becomes a drag.
+                beginCropDraw(world, true);
+            } else {
+                applyImageCrop();
+            }
             return;
         }
 
@@ -3788,9 +3933,17 @@
         // A crop drag ends on pointer up, but the session stays open until it
         // is applied or cancelled.
         if (cropSession) {
+            const shouldApplyClick = cropDragHandle === "draw" &&
+                !cropDrawActivated && cropDrawClickApplies && !cancelDrawing;
+            if (shouldApplyClick) {
+                applyImageCrop();
+                return;
+            }
             cropDragHandle = null;
             cropDragStartLocal = null;
             cropDragStartRect = null;
+            cropDrawActivated = false;
+            cropDrawClickApplies = false;
             isPanning = false;
             panStartScreen = null;
             updateCanvasCursor();
@@ -3884,7 +4037,7 @@
         const world = screenToWorld(e.clientX, e.clientY);
         // Ctrl/Cmd or Shift extends the selection instead of replacing it.
         const addToSelection = e.ctrlKey || e.metaKey || e.shiftKey;
-        handlePrimaryDownAtWorld(world, e.clientX, e.clientY, addToSelection);
+        handlePrimaryDownAtWorld(world, e.clientX, e.clientY, addToSelection, e.shiftKey);
     });
 
     function hasActiveMouseInteraction() {
