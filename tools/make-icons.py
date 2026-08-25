@@ -1,5 +1,8 @@
 """Generate PWA icons from favicon.png. Pure stdlib (zlib), no dependencies.
 
+favicon.png is normalised in place first: any white matte left in its rounded
+corners by the original export is converted back to transparency.
+
 Run from the repo root:  python tools/make-icons.py
 """
 import struct
@@ -123,7 +126,77 @@ def paste(dst, dw, src, sw, sh, ox, oy):
                     dst[d + k] = (src[s + k] * a + dst[d + k] * (255 - a)) // 255
 
 
+def clear_corner_matte(w, h, px):
+    """Replace the white matte outside the rounded corners with transparency.
+
+    The source artwork was rendered onto an opaque white page, so its corners
+    carry white pixels rather than empty ones and the icon shows four white
+    notches on any non-white background.  Every corner pixel is either the blue
+    field, the white page, or an antialiased mix of the two, so the mix ratio
+    recovers the coverage the renderer meant to write into the alpha channel.
+
+    Only the wedge of matte reachable from the outer corner is touched, so
+    white belonging to the artwork can never be dissolved.  Compositing the
+    result back onto white reproduces the source, and a corner that is already
+    clear is left alone, so this is a no-op on an icon that has been fixed.
+    """
+    box = int(min(w, h) * 0.22)
+    for ox, oy in ((0, 0), (w - box, 0), (0, h - box), (w - box, h - box)):
+        cx = ox if ox == 0 else ox + box - 1
+        cy = oy if oy == 0 else oy + box - 1
+        if px[(cy * w + cx) * 4 + 3] == 0:
+            continue
+
+        # Field colour, averaged over the corner's opaque pixels that are
+        # nowhere near white and so cannot be matte or a blend of it.
+        acc = [0, 0, 0]
+        n = 0
+        for y in range(oy, oy + box):
+            for x in range(ox, ox + box):
+                o = (y * w + x) * 4
+                if px[o + 3] == 255 and px[o] < 20:
+                    for k in range(3):
+                        acc[k] += px[o + k]
+                    n += 1
+        if not n:
+            continue
+        field = [c // n for c in acc]
+        d = [255 - c for c in field]
+        dd = float(sum(v * v for v in d))
+
+        def coverage(x, y):
+            o = (y * w + x) * 4
+            a = px[o + 3] / 255.0
+            # How far the pixel, composited over the white page, sits along the
+            # line from white to the field colour.
+            t = sum((255 - (px[o + k] * a + 255 * (1 - a))) * d[k]
+                    for k in range(3)) / dd
+            return max(0.0, min(1.0, t))
+
+        stack = [(cx, cy)]
+        seen = set(stack)
+        while stack:
+            x, y = stack.pop()
+            c = coverage(x, y)
+            if c > 0.9:
+                continue                    # solid field; the matte ends here
+            # Sub-1% coverage is the page's own off-white, not artwork.
+            alpha = int(c * 255 + 0.5) if c > 0.01 else 0
+            o = (y * w + x) * 4
+            px[o:o + 4] = bytes(field) + bytes([alpha])
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if (ox <= nx < ox + box and oy <= ny < oy + box
+                        and (nx, ny) not in seen):
+                    seen.add((nx, ny))
+                    stack.append((nx, ny))
+
+
 sw, sh, src = read_png(SRC)
+before = bytes(src)
+clear_corner_matte(sw, sh, src)
+if bytes(src) != before:
+    write_png(SRC, sw, sh, src)
+    print("rewrote %s with transparent corners" % SRC)
 
 # Plain "any" icons: straight resample of the source artwork.
 for size in (192, 512):
@@ -133,9 +206,9 @@ for size in (192, 512):
 # survives the aggressive circular crop launchers apply.
 bg = tuple(src[(3 * sw + sw // 2) * 4 + k] for k in range(3))
 
-# The source is a rounded square with white showing through at the corners.
-# Flood those corners with the field colour first, otherwise the inset artwork
-# lands on the blue field with four white notches around it.
+# The source is a rounded square with transparent corners.  Flood those
+# corners with the field colour first, otherwise the inset artwork lands on
+# the blue field with four notches cut out around it.
 flat = bytearray(src)
 corner = int(sw * 0.2)
 for y in range(sh):
