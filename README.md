@@ -61,8 +61,13 @@ python tools/make-icons.py
 ```
 
 ## Basic Usage
-- **Draw:** Select **Pen**, click and drag on the canvas.
-- **Change color/size:** Use the toolbar controls for color and size.
+- **Draw:** Select **Pen** or a shape tool, then click and drag on the canvas.
+  The finished item remains selected for immediate editing while its drawing
+  tool stays active, so you can continue drawing more items of the same kind.
+- **Change color/size:** Use the floating settings panel on the right. It shows
+  the options supported by the active drawing tool or current selection.
+- **Change order:** Use **Send to Back** or **Bring to Front** in the floating
+  settings panel when one or more items are selected.
 - **Add text:** Select **Text**, click on the canvas, and enter your text.
 - **Edit/move:** Use **Select/Move** to pick and drag existing strokes or text.
 - **Select several items:** `Ctrl+click` (or `Shift+click`) each one to add it to the
@@ -81,12 +86,14 @@ python tools/make-icons.py
   Front** also apply to the whole selection, skipping items they cannot affect (a
   fill colour ignores text, for example). Resize and rotate handles, and **Crop**,
   need exactly one item selected.
+- **Escape:** Press `Esc` once to clear the current selection. Press it again
+  when nothing is selected to switch to **Select/Move**.
 - **Pan/zoom:** Use **Hand/Pan** or middle mouse to pan, and the mouse wheel to zoom.
 - **Fit to view:** Press `Space` to zoom and pan so everything you have drawn fits
   on screen (ignored while the Text tool is active or you are editing text).
 - **Undo/Redo:** Use the toolbar buttons or `Ctrl+Z` / `Ctrl+Y`.
-- **Crop an image:** Select an image and click **Crop** (or double-click the
-  image). Drag a rectangle over the image to draw a new crop window, drag its
+- **Crop an image:** Select an image and click **Crop** in the floating settings
+  panel (or double-click the image). Drag a rectangle over the image to draw a new crop window, drag its
   corner or edge handles to resize it, or drag inside it to slide it over the
   picture. `Shift`-drag draws a replacement window from inside an existing one.
   **Apply** (or `Enter`, or a click outside) keeps the crop, **Cancel** (or `Esc`)
