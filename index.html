@@ -498,7 +498,7 @@
 
     <button id="update-app" title="A new version is ready — reload to use it">Update</button>
     <button id="install-app" title="Install this app on your device">Install</button>
-    <button id="clear">Clear</button>
+    <button id="clear" title="Clear everything (Ctrl+N)">Clear</button>
 </div>
 
 <canvas id="canvas" class="drawing-pad pen-mode"></canvas>
@@ -2299,6 +2299,13 @@
             // bookmark dialog never opens over the canvas.
             e.preventDefault();
             duplicateSelectedShapes();
+        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+            e.key.toLowerCase() === "n" && !targetIsEditable) {
+            // Start a blank page. Undo still brings the drawing back, since
+            // Clear pushes the empty canvas onto the history stack.
+            e.preventDefault();
+            closeSaveMenu();
+            clearButton.click();
         } else if (e.key === "Delete" && selectedShapes.length && !targetIsEditable) {
             e.preventDefault();
             cancelImageCrop();
