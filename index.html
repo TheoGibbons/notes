@@ -463,7 +463,7 @@
     <div class="divider"></div>
 
     <button data-tool="eraser" title="Eraser (E)">Eraser</button>
-    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C to copy as an image, Ctrl+D to duplicate">Select / Move</button>
+    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C to copy as an image, Ctrl+D to duplicate, arrow keys to nudge">Select / Move</button>
     <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
 
     <div class="divider"></div>
@@ -817,23 +817,58 @@
 
         const offset = DUPLICATE_OFFSET_SCREEN / (camera.scale || 1);
         const copies = cloneShapes(originals);
-        for (const copy of copies) {
-            if (copy.type === "stroke") {
-                for (const point of copy.points) {
-                    point.x += offset;
-                    point.y += offset;
-                }
-            } else {
-                copy.x += offset;
-                copy.y += offset;
-            }
-        }
+        for (const copy of copies) translateShape(copy, offset, offset);
 
         shapes.push(...copies);
         setSelection(copies);
         switchToSelectTool();
         pushHistory();
         updateControlVisibility();
+        render();
+    }
+
+    function translateShape(shape, dx, dy) {
+        if (shape.type === "stroke") {
+            for (const point of shape.points) {
+                point.x += dx;
+                point.y += dy;
+            }
+        } else {
+            shape.x += dx;
+            shape.y += dy;
+        }
+    }
+
+    // Arrow keys nudge the selection by one screen pixel (ten with Shift), so
+    // a step looks the same size at any zoom level.
+    const NUDGE_STEP_SCREEN = 1;
+    const NUDGE_LARGE_STEP_SCREEN = 10;
+    const NUDGE_DIRECTIONS = {
+        ArrowLeft: { x: -1, y: 0 },
+        ArrowRight: { x: 1, y: 0 },
+        ArrowUp: { x: 0, y: -1 },
+        ArrowDown: { x: 0, y: 1 },
+    };
+    // The history entry the current nudge wrote. Key repeats rewrite it in
+    // place, so holding an arrow down is one undo step rather than one per pixel.
+    let nudgeSnapshot = null;
+
+    function nudgeSelectedShapes(direction, large, isRepeat) {
+        const step = (large ? NUDGE_LARGE_STEP_SCREEN : NUDGE_STEP_SCREEN) / (camera.scale || 1);
+        for (const shape of selectedShapes) {
+            translateShape(shape, direction.x * step, direction.y * step);
+        }
+
+        const continuesNudge = isRepeat && nudgeSnapshot !== null &&
+            historyIndex === history.length - 1 && history[historyIndex] === nudgeSnapshot;
+        if (continuesNudge) {
+            nudgeSnapshot = JSON.stringify(shapes);
+            history[historyIndex] = nudgeSnapshot;
+            updateDirtyState();
+        } else {
+            pushHistory();
+            nudgeSnapshot = history[historyIndex];
+        }
         render();
     }
 
@@ -2318,6 +2353,13 @@
             }
             updateControlVisibility();
             render();
+        } else if (NUDGE_DIRECTIONS[e.key] && selectedShapes.length && !targetIsEditable &&
+            !(e.target instanceof HTMLSelectElement) && !currentTextEditor && !cropSession &&
+            !hasActiveMouseInteraction() && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            // Skipped mid-drag: the drag positions shapes from where it started
+            // and would undo the nudge on the next mouse move anyway.
+            e.preventDefault();
+            nudgeSelectedShapes(NUDGE_DIRECTIONS[e.key], e.shiftKey, e.repeat);
         } else if (e.key === " " && !targetIsEditable && !targetIsButton && !currentTextEditor &&
             currentTool !== "text" && !(e.target instanceof HTMLSelectElement) &&
             !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
