@@ -478,6 +478,41 @@
         .toolbar .menu-panel .menu-save-row > button.menu-save-action.danger:hover {
             color: #c00;
         }
+        /* Zoom controls, bottom-right of the canvas */
+        .zoom-controls {
+            position: fixed;
+            right: 12px;
+            bottom: 12px;
+            z-index: 20;
+            display: inline-flex;
+            border: 1px solid #d7d7d7;
+            border-radius: 6px;
+            background: #fff;
+            box-shadow: 0 4px 14px rgb(0 0 0 / 12%);
+            overflow: hidden;
+            font-size: 13px;
+        }
+        .zoom-controls button {
+            min-width: 32px;
+            border: 0;
+            background: transparent;
+            padding: 6px 10px;
+            font: inherit;
+            cursor: pointer;
+        }
+        .zoom-controls button:hover,
+        .zoom-controls button:focus-visible {
+            background: #eaf3ff;
+        }
+        .zoom-controls #zoom-reset {
+            min-width: 58px;
+            border-left: 1px solid #e3e3e3;
+            border-right: 1px solid #e3e3e3;
+            font-variant-numeric: tabular-nums;
+        }
+        .zoom-controls #zoom-fit {
+            border-left: 1px solid #e3e3e3;
+        }
 
         .toolbar>* {
             zoom: 0.6;
@@ -595,6 +630,13 @@
         <button id="crop-cancel" title="Cancel crop (Esc)">Cancel</button>
     </div>
 </aside>
+
+<div class="zoom-controls" role="group" aria-label="Zoom">
+    <button type="button" id="zoom-out" title="Zoom out (Ctrl+−)" aria-label="Zoom out">−</button>
+    <button type="button" id="zoom-reset" title="Reset zoom to 100% (Ctrl+0)" aria-label="Reset zoom to 100%">100%</button>
+    <button type="button" id="zoom-in" title="Zoom in (Ctrl+=)" aria-label="Zoom in">+</button>
+    <button type="button" id="zoom-fit" title="Zoom to fit everything (Space)">Fit</button>
+</div>
 
 <div class="dialog-backdrop" id="save-image-backdrop" hidden>
     <form class="dialog" id="save-image-dialog" role="dialog" aria-modal="true"
@@ -721,6 +763,11 @@
     const cropApplyButton = document.getElementById("crop-apply");
     const cropResetButton = document.getElementById("crop-reset");
     const cropCancelButton = document.getElementById("crop-cancel");
+
+    const zoomOutButton = document.getElementById("zoom-out");
+    const zoomResetButton = document.getElementById("zoom-reset");
+    const zoomInButton = document.getElementById("zoom-in");
+    const zoomFitButton = document.getElementById("zoom-fit");
 
     const STORAGE_KEY = "drawingPad_saves_v1";
     const SAVE_DB_NAME = "drawingPadDatabase";
@@ -1159,6 +1206,8 @@
                 drawImageShape(s, scale, sceneCamera);
             }
         }
+
+        updateZoomLabel();
 
         if (preview) {
             drawSavePreviewLabel(preview.name);
@@ -2484,6 +2533,15 @@
             e.preventDefault();
             closeSaveMenu();
             clearButton.click();
+        } else if (mod && !e.altKey && (e.key === "=" || e.key === "+") && !targetIsEditable) {
+            e.preventDefault();
+            zoomBy(ZOOM_STEP);
+        } else if (mod && !e.altKey && (e.key === "-" || e.key === "_") && !targetIsEditable) {
+            e.preventDefault();
+            zoomBy(1 / ZOOM_STEP);
+        } else if (mod && !e.altKey && e.key === "0" && !targetIsEditable) {
+            e.preventDefault();
+            setZoom(1);
         } else if ((e.key === "Delete" || e.key === "Backspace") && selectedShapes.length &&
             !targetIsEditable && !targetIsSelect) {
             // Backspace too: it is the delete key on a Mac keyboard.
@@ -4551,33 +4609,116 @@
         stopAllInteractions();
     });
 
-    // Scroll wheel zoom (desktop)
+    // --- Zoom ---------------------------------------------------------------
+    const ZOOM_STEP = 1.2;          // buttons and Ctrl/Cmd +/−
+    const WHEEL_ZOOM_STEP = 1.1;    // one notch of a mouse wheel
+    const PINCH_ZOOM_SPEED = 0.01;  // trackpad pinch, per unit of deltaY
+
+    function repositionTextEditor() {
+        if (currentTextEditor) positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+    }
+
+    // Zoom to `nextScale`, keeping the world point under (screenX, screenY) —
+    // canvas pixels, the view's centre by default — where it is.
+    function setZoom(nextScale, screenX = canvas.width / 2, screenY = canvas.height / 2) {
+        const scale = camera.scale || 1;
+        const clamped = Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
+        const worldX = camera.x + screenX / scale;
+        const worldY = camera.y + screenY / scale;
+        camera.scale = clamped;
+        camera.x = worldX - screenX / clamped;
+        camera.y = worldY - screenY / clamped;
+        render();
+        repositionTextEditor();
+    }
+
+    function zoomBy(factor, screenX, screenY) {
+        setZoom((camera.scale || 1) * factor, screenX, screenY);
+    }
+
+    function updateZoomLabel() {
+        const label = `${Math.round((camera.scale || 1) * 100)}%`;
+        if (zoomResetButton.textContent !== label) zoomResetButton.textContent = label;
+    }
+
+    zoomInButton.addEventListener("click", () => zoomBy(ZOOM_STEP));
+    zoomOutButton.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
+    zoomResetButton.addEventListener("click", () => setZoom(1));
+    zoomFitButton.addEventListener("click", () => zoomToFitShapes());
+
+    // A notched mouse wheel zooms a step at a time. Trackpads send a stream
+    // of small, often diagonal, deltas: two fingers pan and a pinch (which
+    // browsers report as Ctrl+wheel) zooms smoothly.
+    function looksLikeMouseWheel(e) {
+        if (e.deltaMode !== 0) return true;            // whole lines or pages (Firefox)
+        if (e.deltaX !== 0) return false;              // sideways movement: a trackpad
+        const legacyDelta = e.wheelDeltaY;
+        if (typeof legacyDelta === "number" && legacyDelta !== 0) {
+            if (legacyDelta === -3 * e.deltaY) return false; // macOS trackpad (Chrome, Safari)
+            return legacyDelta % 120 === 0;            // wheel notches come in steps of 120
+        }
+        return Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50;
+    }
+
+    // One gesture produces many events; classify the first and stick with it,
+    // so a stray event mid-swipe can't flip a pan into a zoom.
+    let lastWheelGesture = { time: 0, isMouse: false };
+    let safariGestureStartScale = null;
+
     canvas.addEventListener("wheel", (e) => {
         e.preventDefault();
 
+        const now = performance.now();
+        const continuing = now - lastWheelGesture.time < 150;
+        const isMouse = continuing ? lastWheelGesture.isMouse : looksLikeMouseWheel(e);
+        lastWheelGesture = { time: now, isMouse };
+
         const rect = getCanvasRect();
-        const scale = camera.scale || 1;
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
 
-        const worldX = camera.x + sx / scale;
-        const worldY = camera.y + sy / scale;
-
-        const zoomFactor = 1.1;
-        const delta = e.deltaY < 0 ? 1 : -1;
-        let newScale = delta > 0 ? scale * zoomFactor : scale / zoomFactor;
-
-        newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
-        camera.scale = newScale;
-
-        camera.x = worldX - sx / newScale;
-        camera.y = worldY - sy / newScale;
-
-        render();
-        if (currentTextEditor) {
-            positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+        if (isMouse) {
+            if (e.deltaY === 0) return;
+            zoomBy(e.deltaY < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP, sx, sy);
+            return;
         }
+
+        if (e.ctrlKey || e.metaKey) {
+            // Safari reports pinches as gesture events, handled below.
+            if (safariGestureStartScale !== null) return;
+            const factor = Math.min(2, Math.max(0.5, Math.exp(-e.deltaY * PINCH_ZOOM_SPEED)));
+            zoomBy(factor, sx, sy);
+            return;
+        }
+
+        let dx = e.deltaX;
+        let dy = e.deltaY;
+        if (e.shiftKey && dx === 0) {
+            dx = dy;
+            dy = 0;
+        }
+        const scale = camera.scale || 1;
+        camera.x += dx / scale;
+        camera.y += dy / scale;
+        render();
+        repositionTextEditor();
     }, { passive: false });
+
+    // Safari's trackpad pinch.
+    canvas.addEventListener("gesturestart", (e) => {
+        e.preventDefault();
+        safariGestureStartScale = camera.scale || 1;
+    });
+    canvas.addEventListener("gesturechange", (e) => {
+        e.preventDefault();
+        if (safariGestureStartScale === null) return;
+        const rect = getCanvasRect();
+        setZoom(safariGestureStartScale * e.scale, e.clientX - rect.left, e.clientY - rect.top);
+    });
+    canvas.addEventListener("gestureend", (e) => {
+        e.preventDefault();
+        safariGestureStartScale = null;
+    });
 
     // Touch helpers
     function distanceTouches(t1, t2) {
