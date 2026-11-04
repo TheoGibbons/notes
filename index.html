@@ -1029,6 +1029,13 @@
     let resizeChanged = false;
     let rotateChanged = false;
 
+    let lastPointerClient = null;  // last known mouse position, in client px
+    const ANGLE_SNAP = Math.PI / 12; // Shift snaps angles to 15° steps
+
+    function snapAngle(angle) {
+        return Math.round(angle / ANGLE_SNAP) * ANGLE_SNAP;
+    }
+
     // Pen / text settings
     let penColor = "#000000";
     let penWidth = 2;
@@ -4065,7 +4072,7 @@
         dragStartWorld = { ...world };
     }
 
-    function resizeSegmentEndpoint(shape, bounds, world, minLength) {
+    function resizeSegmentEndpoint(shape, bounds, world, minLength, snap = false) {
         const halfLength = bounds.width / 2;
         const start = localToWorldForBounds(bounds, -halfLength, 0);
         const end = localToWorldForBounds(bounds, halfLength, 0);
@@ -4078,6 +4085,17 @@
             nextStart = { x: start.x + pointerDx, y: start.y + pointerDy };
         } else {
             nextEnd = { x: end.x + pointerDx, y: end.y + pointerDy };
+        }
+
+        if (snap) {
+            // Shift: swing the dragged end around the fixed one in 15° steps.
+            const fixed = activeHandle === "start" ? nextEnd : nextStart;
+            const moving = activeHandle === "start" ? nextStart : nextEnd;
+            const reach = Math.hypot(moving.x - fixed.x, moving.y - fixed.y);
+            const angle = snapAngle(Math.atan2(moving.y - fixed.y, moving.x - fixed.x));
+            const snapped = { x: fixed.x + Math.cos(angle) * reach, y: fixed.y + Math.sin(angle) * reach };
+            if (activeHandle === "start") nextStart = snapped;
+            else nextEnd = snapped;
         }
 
         let dx = nextEnd.x - nextStart.x;
@@ -4185,12 +4203,26 @@
         render();
     }
 
-    function updateDraftShape(world) {
+    // Shift (`constrain`) draws squares and circles, and snaps lines and
+    // arrows to 15° steps.
+    function updateDraftShape(world, constrain = false) {
         if (!draftShape || !drawingStartWorld) return;
 
         const start = drawingStartWorld;
-        const dx = world.x - start.x;
-        const dy = world.y - start.y;
+        let dx = world.x - start.x;
+        let dy = world.y - start.y;
+        if (constrain) {
+            if (draftShape.type === "rect" || draftShape.type === "circle") {
+                const side = Math.max(Math.abs(dx), Math.abs(dy));
+                dx = (dx < 0 ? -1 : 1) * side;
+                dy = (dy < 0 ? -1 : 1) * side;
+            } else if (isSegmentShape(draftShape)) {
+                const length = Math.hypot(dx, dy);
+                const angle = snapAngle(Math.atan2(dy, dx));
+                dx = Math.cos(angle) * length;
+                dy = Math.sin(angle) * length;
+            }
+        }
         draftShape.x = start.x + dx / 2;
         draftShape.y = start.y + dy / 2;
 
@@ -4335,7 +4367,10 @@
         }
     }
 
-    function handlePointerMove(world, screenX, screenY, keepAspectRatio = false) {
+    // `shiftKey` constrains whatever is being dragged: squares, circles and
+    // 15° angles while drawing or rotating, kept proportions while resizing.
+    function handlePointerMove(world, screenX, screenY, shiftKey = false) {
+        const keepAspectRatio = shiftKey;
         // Crop drags own the pointer, but middle-mouse panning still works.
         if (cropSession && !isPanning) {
             updateCropDrag(world);
@@ -4346,7 +4381,7 @@
             currentStroke.points.push(world);
             render();
         } else if (isShapeDrawingTool(currentTool) && isDrawing && draftShape) {
-            updateDraftShape(world);
+            updateDraftShape(world, shiftKey);
             render();
         } else if (currentTool === "eraser" && isDrawing) {
             eraseAt(world.x, world.y);
@@ -4365,7 +4400,7 @@
 
                 if (isSegmentShape(selectedShape) &&
                     (activeHandle === "start" || activeHandle === "end")) {
-                    resizeSegmentEndpoint(selectedShape, b, world, minSize);
+                    resizeSegmentEndpoint(selectedShape, b, world, minSize, shiftKey);
                     resizeChanged = true;
                     render();
                     return;
@@ -4388,7 +4423,7 @@
                 let newW = Math.max(minSize, signX * (originalDraggedX + dxLocal - fixedX));
                 let newH = Math.max(minSize, signY * (originalDraggedY + dyLocal - fixedY));
 
-                if (selectedShape.type === "image" && keepAspectRatio && b.width > 0 && b.height > 0) {
+                if (keepAspectRatio && b.width > 0 && b.height > 0) {
                     const widthScale = newW / b.width;
                     const heightScale = newH / b.height;
                     const uniformScale = Math.max(
@@ -4427,7 +4462,8 @@
                 const dx = world.x - rotationCenter.x;
                 const dy = world.y - rotationCenter.y;
                 const angle = Math.atan2(dy, dx);
-                selectedShape.rotation = shapeStartRotation + (angle - rotationStartAngle);
+                const rotation = shapeStartRotation + (angle - rotationStartAngle);
+                selectedShape.rotation = shiftKey ? snapAngle(rotation) : rotation;
                 rotateChanged = true;
                 render();
             } else if (isDraggingSelection && originalShapeData) {
@@ -4566,6 +4602,7 @@
         // On a Mac, Ctrl+click is a right-click: leave it to the context menu.
         if (IS_MAC && e.ctrlKey && e.button === 0) return;
         commitCurrentTextEditor();
+        lastPointerClient = { x: e.clientX, y: e.clientY };
 
         // Middle mouse: always pan
         if (e.button === 1) {
@@ -4591,6 +4628,7 @@
     // Tracked on the window so a drag keeps following the mouse when it leaves
     // the canvas (or the browser window) and only ends on a real mouse up.
     window.addEventListener("mousemove", (e) => {
+        lastPointerClient = { x: e.clientX, y: e.clientY };
         if (!hasActiveMouseInteraction()) return;
 
         // The button was released outside the window: end the interaction
@@ -4607,6 +4645,22 @@
     window.addEventListener("mouseup", () => {
         if (!hasActiveMouseInteraction()) return;
         stopAllInteractions();
+    });
+
+    // Pressing or releasing Shift mid-drag re-applies the constraint at once,
+    // without waiting for the mouse to move.
+    function refreshConstrainedDrag(shiftKey) {
+        if (!lastPointerClient) return;
+        const constrainable = (isDrawing && draftShape) || isResizing || isRotating;
+        if (!constrainable) return;
+        const { x, y } = lastPointerClient;
+        handlePointerMove(screenToWorld(x, y), x, y, shiftKey);
+    }
+    window.addEventListener("keydown", (e) => {
+        if (e.key === "Shift" && !e.repeat) refreshConstrainedDrag(true);
+    });
+    window.addEventListener("keyup", (e) => {
+        if (e.key === "Shift") refreshConstrainedDrag(false);
     });
 
     // --- Zoom ---------------------------------------------------------------
