@@ -4,8 +4,9 @@
     <meta charset="UTF-8" />
     <title>Simple Drawing Pad</title>
     <link rel="icon" type="image/png" href="favicon.png" />
-    <!-- Prevent page zoom; we handle zoom ourselves on the canvas -->
-<!--    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />-->
+    <!-- Lay the page out at the device's real width, so phones get touch-sized
+         controls, and prevent page zoom: we handle zoom ourselves on the canvas -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 
     <!-- Installable app (PWA) -->
     <link rel="manifest" href="manifest.json" />
@@ -30,23 +31,199 @@
             flex-direction: column;
             position: relative;
         }
+        /* ---- Top toolbar ---------------------------------------------------
+           Compact icon buttons with a mouse, bigger ones on touch screens. It
+           always stays one row high: when the window is too narrow, the tool
+           strip scrolls sideways while undo, redo and the menu stay put. */
         .toolbar {
+            --toolbar-button: 32px;
+            --toolbar-icon: 18px;
+            --toolbar-bg: #fafafa;
             display: flex;
-            flex-wrap: wrap;
             align-items: center;
-            gap: 6px;
-            padding: 8px 12px;
+            gap: 2px;
+            padding: 4px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left));
             border-bottom: 1px solid #ddd;
-            background: #fafafa;
-            font-size: 14px;
+            background: var(--toolbar-bg);
+            font-size: 13px;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
         }
-        .toolbar button,
+        @media (pointer: coarse) {
+            .toolbar {
+                --toolbar-button: 40px;
+                --toolbar-icon: 22px;
+            }
+        }
+        .toolbar-tools,
+        .toolbar-actions,
+        .toolbar-end {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+        .toolbar-tools-wrap {
+            position: relative;
+            display: flex;
+            flex: 0 1 auto;
+            min-width: 0;
+        }
+        .toolbar-tools {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-x: auto;
+            overscroll-behavior-x: contain;
+            scrollbar-width: none;
+        }
+        .toolbar-tools::-webkit-scrollbar {
+            display: none;
+        }
+        /* Whichever end has tools scrolled out of sight fades into the bar,
+           with a chevron pointing the way to them. Taps go straight through
+           to the button underneath. */
+        .toolbar-tools-wrap::before,
+        .toolbar-tools-wrap::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 28px;
+            background-repeat: no-repeat;
+            background-size: 14px 14px, 100% 100%;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .toolbar-tools-wrap::before {
+            left: 0;
+            background-image:
+                url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m15 6-6 6 6 6'/%3E%3C/svg%3E"),
+                linear-gradient(to left, transparent, var(--toolbar-bg) 12px);
+            background-position: left 1px center, 0 0;
+        }
+        .toolbar-tools-wrap::after {
+            right: 0;
+            background-image:
+                url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E"),
+                linear-gradient(to right, transparent, var(--toolbar-bg) 12px);
+            background-position: right 1px center, 0 0;
+        }
+        .toolbar-tools-wrap.more-before::before,
+        .toolbar-tools-wrap.more-after::after {
+            opacity: 1;
+        }
+        .toolbar-actions {
+            flex: 1 0 auto;
+        }
+        .toolbar-end {
+            margin-left: auto;
+        }
+        .toolbar-divider {
+            flex: none;
+            width: 1px;
+            height: 20px;
+            margin: 0 5px;
+            background: #ddd;
+        }
+        .tool-button {
+            flex: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            min-width: var(--toolbar-button);
+            height: var(--toolbar-button);
+            padding: 0;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: #333;
+            font: inherit;
+            cursor: pointer;
+        }
+        .tool-button.with-label {
+            padding: 0 10px 0 8px;
+        }
+        @media (hover: hover) {
+            .tool-button:hover:not(:disabled) {
+                background: #ebebeb;
+            }
+        }
+        .tool-button:active:not(:disabled) {
+            background: #e0e0e0;
+        }
+        .tool-button.active,
+        .tool-button[aria-expanded="true"] {
+            background: #dbe9ff;
+            color: #0a58ca;
+        }
+        .tool-button:disabled {
+            color: #c2c2c2;
+            cursor: default;
+        }
+        .tool-button:focus-visible {
+            outline: 2px solid #007bff;
+            outline-offset: -2px;
+        }
+        .icon-sprite {
+            position: absolute;
+            width: 0;
+            height: 0;
+            overflow: hidden;
+        }
+        .icon {
+            flex: none;
+            width: var(--toolbar-icon, 18px);
+            height: var(--toolbar-icon, 18px);
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            pointer-events: none;
+        }
+        /* PWA controls: only revealed when the browser offers an install
+           prompt, or when a new version is waiting to activate. */
+        #install-app,
+        #update-app {
+            display: none;
+        }
+        #install-app.available,
+        #update-app.available {
+            display: inline-flex;
+        }
+        #update-app.available,
+        #save-menu-button.save-success {
+            background: #28a745;
+            color: #fff;
+        }
+        /* Narrow windows: Clear and the shortcut list move into the menu, and
+           Install/Update lose their words, to leave room for the tools. */
+        @media (max-width: 700px) {
+            .toolbar .wide-only {
+                display: none;
+            }
+            .tool-button .tool-label {
+                display: none;
+            }
+            .tool-button.with-label {
+                padding: 0;
+            }
+        }
+        @media (min-width: 701px) {
+            .toolbar .menu-panel .narrow-only {
+                display: none;
+            }
+        }
+        @media (hover: none) {
+            /* No keyboard to speak of on a phone or a tablet without one. */
+            .toolbar .menu-panel .needs-keyboard {
+                display: none;
+            }
+        }
+
         .settings-panel button,
-        .toolbar select,
-        .toolbar input[type="text"],
-        .toolbar input[type="number"],
-        .toolbar input[type="color"],
-        .toolbar input[type="range"],
         .settings-panel input[type="number"],
         .settings-panel input[type="color"],
         .settings-panel input[type="range"] {
@@ -57,13 +234,11 @@
             font-size: 13px;
             cursor: pointer;
         }
-        .toolbar input[type="color"],
         .settings-panel input[type="color"] {
             padding: 0;
             width: 36px;
             height: 28px;
         }
-        .toolbar input[type="range"],
         .settings-panel input[type="range"] {
             /* Sliders don't take the text-box border and padding above: with
                them, the thumb stops short of both ends of the track. */
@@ -72,46 +247,16 @@
             background: transparent;
             cursor: pointer;
         }
-        .toolbar input[type="text"] {
-            cursor: text;
-            width: 150px;
-        }
-        .toolbar input[type="number"],
         .settings-panel input[type="number"] {
             cursor: text;
             width: 58px;
-        }
-        .toolbar button.active {
-            background: #007bff;
-            color: #fff;
-            border-color: #007bff;
         }
         .settings-panel button:disabled {
             background: #f5f5f5;
             color: #888;
             cursor: default;
         }
-        .toolbar select:disabled {
-            background: #f5f5f5;
-            color: #888;
-            cursor: default;
-        }
-        /* PWA controls: only revealed when the browser offers an install
-           prompt, or when a new version is waiting to activate. */
-        #install-app,
-        #update-app {
-            display: none;
-        }
-        #install-app.available,
-        #update-app.available {
-            display: inline-block;
-        }
-        #update-app.available {
-            background: #28a745;
-            border-color: #28a745;
-            color: #fff;
-        }
-        /* Save/Import dropdown */
+        /* Menu: save, export, import (at the right-hand end of the toolbar) */
         .menu {
             position: relative;
             display: inline-flex;
@@ -121,7 +266,7 @@
             /* Flush against the button: any gap here is a dead zone the pointer
                would cross on its way down, closing the menu. */
             top: 100%;
-            left: 0;
+            right: 0;
             z-index: 30;
             min-width: 240px;
             max-width: 340px;
@@ -139,13 +284,22 @@
             width: 100%;
             text-align: left;
             border: 0;
+            border-radius: 4px;
             background: transparent;
             padding: 6px 8px;
+            color: inherit;
+            font: inherit;
+            cursor: pointer;
             /* Save names (and their timestamps) can be long — keep the panel
                from growing, and let the title show the full text. */
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+        @media (pointer: coarse) {
+            .toolbar .menu-panel button {
+                padding: 10px 12px;
+            }
         }
         .toolbar .menu-panel button:hover,
         .toolbar .menu-panel button:focus-visible,
@@ -202,28 +356,26 @@
             color: #888;
             padding: 4px 8px 6px;
         }
-        #save-menu-button.save-success {
-            background: #28a745;
-            border-color: #28a745;
-            color: #fff;
-        }
-        .toolbar .group-label {
-            font-weight: 600;
-            margin-right: 4px;
-        }
-        .toolbar .divider {
-            width: 1px;
-            height: 31px;
-            background: #ddd;
-            margin: 0 6px;
-        }
-        .toolbar .spacer {
-            flex: 1;
-        }
-        .toolbar .inline-group {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
+        /* Small screens: the Autosaves list opens inside the menu rather than
+           beside it (there is no room beside it), and the menu scrolls if it
+           grows taller than the screen. */
+        @media (max-width: 700px), (max-height: 500px) {
+            .menu-panel {
+                max-height: calc(100vh - var(--toolbar-height, 0px) - 8px);
+                overflow-y: auto;
+            }
+            .submenu-panel,
+            .submenu-panel.flip-left {
+                position: static;
+                min-width: 0;
+                max-width: none;
+                margin: 0 0 4px 12px;
+                padding: 0;
+                border: 0;
+                border-left: 2px solid #e3e3e3;
+                border-radius: 0;
+                box-shadow: none;
+            }
         }
         #pen-size-container,
         #color-container,
@@ -245,13 +397,14 @@
         .settings-panel {
             position: fixed;
             top: calc(var(--toolbar-height, 0px) + 12px);
-            right: 12px;
+            right: max(12px, env(safe-area-inset-right));
             z-index: 20;
             display: flex;
             flex-direction: column;
             gap: 10px;
             width: min(290px, calc(100vw - 24px));
-            max-height: calc(100vh - var(--toolbar-height, 0px) - 24px);
+            /* Stops short of the zoom buttons below it, scrolling if need be */
+            max-height: calc(100vh - var(--toolbar-height, 0px) - 68px);
             overflow-y: auto;
             padding: 12px;
             border: 1px solid #d7d7d7;
@@ -529,6 +682,11 @@
                 opacity: 1;
             }
         }
+        @media (pointer: coarse) {
+            .toolbar .menu-panel .menu-save-row > button.menu-save-action {
+                padding: 10px 12px;
+            }
+        }
         .toolbar .menu-panel .menu-save-row > button.menu-save-action:hover {
             color: #000;
         }
@@ -538,8 +696,9 @@
         /* Zoom controls, bottom-right of the canvas */
         .zoom-controls {
             position: fixed;
-            right: 12px;
-            bottom: 12px;
+            /* Clear of a phone's rounded corners and home indicator */
+            right: max(12px, env(safe-area-inset-right));
+            bottom: max(12px, env(safe-area-inset-bottom));
             z-index: 20;
             display: inline-flex;
             border: 1px solid #d7d7d7;
@@ -671,70 +830,188 @@
         #canvas.drawing-pad.eraser-mode.eraser-cursor-visible {
             cursor: none;
         }
-
-        .toolbar>* {
-            zoom: 0.6;
-        }
     </style>
 </head>
 <body>
-<div class="toolbar">
-    <button data-tool="pen" class="active" title="Pen (P)">Pen</button>
-    <button data-tool="text" title="Text (T)">Text</button>
+<!-- Toolbar icons: drawn once here, shown with <use href="#icon-…">. -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="icon-select" viewBox="0 0 24 24">
+        <path d="M6.5 3.5v14.5l3.8-3.4 2.6 5.6 2.3-1.1-2.5-5.5 5.1-.1z"/>
+    </symbol>
+    <symbol id="icon-hand" viewBox="0 0 24 24">
+        <path d="M10 11.5V4.5a1.5 1.5 0 0 1 3 0v7"/>
+        <path d="M13 11.5V6a1.5 1.5 0 0 1 3 0v6"/>
+        <path d="M16 12V8.5a1.5 1.5 0 0 1 3 0v6a6.5 6.5 0 0 1-6.5 6.5h-1.3a6 6 0 0 1-4.2-1.7l-3.4-3.6a1.55 1.55 0 0 1 2.2-2.2L7 15.3V6a1.5 1.5 0 0 1 3 0"/>
+    </symbol>
+    <symbol id="icon-pen" viewBox="0 0 24 24">
+        <path d="M4 20l1.5-4.5 11-11 3 3-11 11z"/>
+        <path d="M5.5 15.5l3 3M14.5 6.5l3 3"/>
+    </symbol>
+    <symbol id="icon-eraser" viewBox="0 0 24 24">
+        <path d="M3.8 17.2 13.5 5.3c.7-.9 2.1-1 3-.3l3.8 3.2c.9.8 1 2.1.2 3l-7.8 9H6.8z"/>
+        <path d="M9.8 12l5.2 4.5M12.7 20.2H19"/>
+    </symbol>
+    <symbol id="icon-text" viewBox="0 0 24 24">
+        <path d="M5 7.5V5h14v2.5M12 5v14M9.5 19h5"/>
+    </symbol>
+    <symbol id="icon-rect" viewBox="0 0 24 24">
+        <rect x="3.5" y="5.5" width="17" height="13" rx="2"/>
+    </symbol>
+    <symbol id="icon-circle" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5"/>
+    </symbol>
+    <symbol id="icon-arrow" viewBox="0 0 24 24">
+        <path d="M5 19 19 5M10 5h9v9"/>
+    </symbol>
+    <symbol id="icon-line" viewBox="0 0 24 24">
+        <path d="M5 19 19 5"/>
+    </symbol>
+    <symbol id="icon-image" viewBox="0 0 24 24">
+        <rect x="3.5" y="4.5" width="17" height="15" rx="2"/>
+        <circle cx="9" cy="9.8" r="1.7"/>
+        <path d="m20.5 15.5-5-5L5 19.5"/>
+    </symbol>
+    <symbol id="icon-undo" viewBox="0 0 24 24">
+        <path d="M9 14 4 9l5-5"/>
+        <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>
+    </symbol>
+    <symbol id="icon-redo" viewBox="0 0 24 24">
+        <path d="m15 14 5-5-5-5"/>
+        <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>
+    </symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24">
+        <path d="M4 6.5h16M4 12h16M4 17.5h16"/>
+    </symbol>
+    <symbol id="icon-keyboard" viewBox="0 0 24 24">
+        <rect x="2.5" y="6" width="19" height="12" rx="2"/>
+        <path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M6.5 14h.01M9.5 14h5M17.5 14h.01"/>
+    </symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24">
+        <path d="M4 6.5h16M9.5 6.5V4.5h5v2"/>
+        <path d="m6.5 6.5.8 12.2a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8l.8-12.2"/>
+        <path d="M10 10.5v6M14 10.5v6"/>
+    </symbol>
+    <symbol id="icon-install" viewBox="0 0 24 24">
+        <path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5"/>
+        <path d="M4.5 17v1.5a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/>
+    </symbol>
+    <symbol id="icon-update" viewBox="0 0 24 24">
+        <path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.7"/>
+        <path d="M20 3.7v5h-5"/>
+    </symbol>
+</svg>
 
-    <div class="divider"></div>
+<header class="toolbar">
+    <div class="toolbar-tools-wrap">
+        <div class="toolbar-tools" id="toolbar-tools" role="group" aria-label="Tools">
+            <button type="button" class="tool-button" data-tool="select" aria-label="Select / Move"
+                    title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C / Ctrl+X / Ctrl+V to copy, cut and paste, Ctrl+D to duplicate, arrow keys to nudge">
+                <svg class="icon" aria-hidden="true"><use href="#icon-select"/></svg>
+            </button>
+            <button type="button" class="tool-button" data-tool="hand" aria-label="Hand / Pan" title="Hand / Pan (H)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-hand"/></svg>
+            </button>
 
-    <button data-tool="rect" title="Rectangle (R)">Rect</button>
-    <button data-tool="circle" title="Circle (C)">Circle</button>
-    <button data-tool="arrow" title="Arrow (A)">Arrow</button>
-    <button data-tool="line" title="Line (L)">Line</button>
+            <span class="toolbar-divider"></span>
 
-    <div class="divider"></div>
+            <button type="button" class="tool-button active" data-tool="pen" aria-label="Pen" title="Pen (P)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-pen"/></svg>
+            </button>
+            <button type="button" class="tool-button" data-tool="eraser" aria-label="Eraser" title="Eraser (E)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-eraser"/></svg>
+            </button>
+            <button type="button" class="tool-button" data-tool="text" aria-label="Text" title="Text (T)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-text"/></svg>
+            </button>
 
-    <button id="insert-image" title="Insert image (I) or paste one with Ctrl+V">Image</button>
-    <input type="file" id="image-file-input" accept="image/*" style="display:none" />
+            <span class="toolbar-divider"></span>
 
-    <div class="divider"></div>
+            <button type="button" class="tool-button" data-tool="rect" aria-label="Rectangle" title="Rectangle (R)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-rect"/></svg>
+            </button>
+            <button type="button" class="tool-button" data-tool="circle" aria-label="Circle" title="Circle (C)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-circle"/></svg>
+            </button>
+            <button type="button" class="tool-button" data-tool="arrow" aria-label="Arrow" title="Arrow (A)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg>
+            </button>
+            <button type="button" class="tool-button" data-tool="line" aria-label="Line" title="Line (L)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-line"/></svg>
+            </button>
 
-    <button data-tool="eraser" title="Eraser (E)">Eraser</button>
-    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C / Ctrl+X / Ctrl+V to copy, cut and paste, Ctrl+D to duplicate, arrow keys to nudge">Select / Move</button>
-    <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
+            <span class="toolbar-divider"></span>
 
-    <div class="divider"></div>
-
-    <span class="group-label">History:</span>
-    <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
-    <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
-
-    <div class="divider"></div>
-
-    <div class="menu" id="save-menu">
-        <button id="save-menu-button" aria-haspopup="true" aria-expanded="false"
-                title="Export, import and local saves">Save/Import ▾</button>
-        <div class="menu-panel" id="save-menu-panel" role="menu" hidden>
-            <button type="button" role="menuitem" id="save-image">Save Image…</button>
-            <button type="button" role="menuitem" id="export-json">Export JSON</button>
-            <button type="button" role="menuitem" id="import-json">Import JSON</button>
-            <div class="menu-separator"></div>
-            <div class="menu-heading">Local saves</div>
-            <button type="button" role="menuitem" id="save-local">Save now…</button>
-            <div class="submenu" id="autosaves-menu" hidden>
-                <button type="button" role="menuitem" id="autosaves-button"
-                        aria-haspopup="true" aria-expanded="false">Autosaves ▸</button>
-                <div class="submenu-panel menu-saves" id="autosaves-list" role="menu" hidden></div>
-            </div>
-            <div class="menu-saves" id="local-saves-list"></div>
+            <button type="button" class="tool-button" id="insert-image" aria-label="Insert image"
+                    title="Insert image (I) — or paste one with Ctrl+V, or drop it on the canvas">
+                <svg class="icon" aria-hidden="true"><use href="#icon-image"/></svg>
+            </button>
         </div>
     </div>
-    <input type="file" id="json-file-input" accept="application/json,.json" style="display:none" />
+    <input type="file" id="image-file-input" accept="image/*" style="display:none" />
 
-    <div class="spacer"></div>
+    <div class="toolbar-actions">
+        <span class="toolbar-divider"></span>
 
-    <button id="show-help" title="Keyboard shortcuts (?)">Shortcuts</button>
-    <button id="update-app" title="A new version is ready — reload to use it">Update</button>
-    <button id="install-app" title="Install this app on your device">Install</button>
-    <button id="clear" title="Clear everything (Ctrl+N)">Clear</button>
-</div>
+        <button type="button" class="tool-button" id="undo" aria-label="Undo" title="Undo (Ctrl+Z)">
+            <svg class="icon" aria-hidden="true"><use href="#icon-undo"/></svg>
+        </button>
+        <button type="button" class="tool-button" id="redo" aria-label="Redo" title="Redo (Ctrl+Y)">
+            <svg class="icon" aria-hidden="true"><use href="#icon-redo"/></svg>
+        </button>
+
+        <div class="toolbar-end">
+            <button type="button" class="tool-button with-label" id="update-app" aria-label="Update"
+                    title="A new version is ready — reload to use it">
+                <svg class="icon" aria-hidden="true"><use href="#icon-update"/></svg>
+                <span class="tool-label">Update</span>
+            </button>
+            <button type="button" class="tool-button with-label" id="install-app" aria-label="Install"
+                    title="Install this app on your device">
+                <svg class="icon" aria-hidden="true"><use href="#icon-install"/></svg>
+                <span class="tool-label">Install</span>
+            </button>
+            <button type="button" class="tool-button wide-only" id="show-help" aria-label="Keyboard shortcuts"
+                    title="Keyboard shortcuts (?)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-keyboard"/></svg>
+            </button>
+            <button type="button" class="tool-button wide-only" id="clear" aria-label="Clear canvas"
+                    title="Clear everything (Ctrl+N)">
+                <svg class="icon" aria-hidden="true"><use href="#icon-trash"/></svg>
+            </button>
+
+            <span class="toolbar-divider wide-only"></span>
+
+            <div class="menu" id="save-menu">
+                <button type="button" class="tool-button" id="save-menu-button" aria-haspopup="true"
+                        aria-expanded="false" aria-label="Menu" title="Menu: save, export and import">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-menu"/></svg>
+                </button>
+                <div class="menu-panel" id="save-menu-panel" role="menu" hidden>
+                    <button type="button" role="menuitem" id="save-image">Save Image…</button>
+                    <button type="button" role="menuitem" id="export-json">Export JSON</button>
+                    <button type="button" role="menuitem" id="import-json">Import JSON</button>
+                    <div class="menu-separator"></div>
+                    <div class="menu-heading">Local saves</div>
+                    <button type="button" role="menuitem" id="save-local">Save now…</button>
+                    <div class="submenu" id="autosaves-menu" hidden>
+                        <button type="button" role="menuitem" id="autosaves-button"
+                                aria-haspopup="true" aria-expanded="false">Autosaves ▸</button>
+                        <div class="submenu-panel menu-saves" id="autosaves-list" role="menu" hidden></div>
+                    </div>
+                    <div class="menu-saves" id="local-saves-list"></div>
+                    <!-- On narrow screens these leave the toolbar for the menu -->
+                    <div class="narrow-only">
+                        <div class="menu-separator"></div>
+                        <button type="button" role="menuitem" id="menu-shortcuts"
+                                class="needs-keyboard">Keyboard shortcuts</button>
+                        <button type="button" role="menuitem" id="menu-clear">Clear canvas</button>
+                    </div>
+                </div>
+            </div>
+            <input type="file" id="json-file-input" accept="application/json,.json" style="display:none" />
+        </div>
+    </div>
+</header>
 
 <canvas id="canvas" class="drawing-pad pen-mode"></canvas>
 
@@ -928,8 +1205,12 @@
     );
     const MOD_KEY_LABEL = IS_MAC ? "⌘" : "Ctrl";
 
-    const toolbarButtons = document.querySelectorAll(".toolbar button[data-tool]");
+    const toolbar = document.querySelector(".toolbar");
+    const toolStrip = document.getElementById("toolbar-tools");
+    const toolbarButtons = toolStrip.querySelectorAll("button[data-tool]");
     const clearButton = document.getElementById("clear");
+    const menuClearButton = document.getElementById("menu-clear");
+    const menuShortcutsButton = document.getElementById("menu-shortcuts");
     const undoButton = document.getElementById("undo");
     const redoButton = document.getElementById("redo");
     const saveImageButton = document.getElementById("save-image");
@@ -2550,7 +2831,7 @@
 
     // Resize canvas
     function resizeCanvas() {
-        const toolbarHeight = document.querySelector(".toolbar").offsetHeight;
+        const toolbarHeight = toolbar.offsetHeight;
         document.documentElement.style.setProperty("--toolbar-height", `${toolbarHeight}px`);
         viewWidth = Math.max(1, window.innerWidth);
         viewHeight = Math.max(1, window.innerHeight - toolbarHeight);
@@ -2563,6 +2844,7 @@
         if (currentTextEditor) {
             positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
         }
+        updateToolStripOverflow();
     }
     window.addEventListener("resize", resizeCanvas);
 
@@ -2755,7 +3037,7 @@
             cropContainer,
         ];
         settingsPanel.hidden = !settingGroups.some(group => group.style.display !== "none");
-        const toolbarHeight = document.querySelector(".toolbar").offsetHeight;
+        const toolbarHeight = toolbar.offsetHeight;
         document.documentElement.style.setProperty("--toolbar-height", `${toolbarHeight}px`);
     }
 
@@ -2809,17 +3091,65 @@
         }
     }
 
+    // Tool strip: when the window is too narrow for every tool, the strip
+    // scrolls sideways, and whichever end has tools hidden past it fades out.
+    const TOOL_STRIP_FADE = 28; // px; matches the fade in the CSS
+
+    function updateToolStripOverflow() {
+        const maxScroll = toolStrip.scrollWidth - toolStrip.clientWidth;
+        const scrolled = toolStrip.scrollLeft;
+        const wrap = toolStrip.parentElement;
+        wrap.classList.toggle("more-before", maxScroll > 1 && scrolled > 1);
+        wrap.classList.toggle("more-after", maxScroll > 1 && scrolled < maxScroll - 1);
+    }
+
+    // Bring a tool's button out from under the faded ends — e.g. when its
+    // keyboard shortcut picks a tool that is scrolled out of sight.
+    function revealToolButton(button) {
+        if (toolStrip.scrollWidth <= toolStrip.clientWidth) return;
+        const strip = toolStrip.getBoundingClientRect();
+        const rect = button.getBoundingClientRect();
+        let delta = 0;
+        if (rect.left < strip.left + TOOL_STRIP_FADE) {
+            delta = rect.left - strip.left - TOOL_STRIP_FADE;
+        } else if (rect.right > strip.right - TOOL_STRIP_FADE) {
+            delta = rect.right - strip.right + TOOL_STRIP_FADE;
+        }
+        if (delta) toolStrip.scrollBy({ left: delta, behavior: "smooth" });
+    }
+
+    toolStrip.addEventListener("scroll", updateToolStripOverflow, { passive: true });
+
+    // A mouse wheel only scrolls up and down; turn it sideways for the strip.
+    toolStrip.addEventListener("wheel", (e) => {
+        if (toolStrip.scrollWidth <= toolStrip.clientWidth) return;
+        if (Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return; // already sideways
+        e.preventDefault();
+        const step = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+        toolStrip.scrollLeft += e.deltaY * step;
+    }, { passive: false });
+
     // Tool switching
+    function setActiveToolButton(tool) {
+        toolbarButtons.forEach(button => {
+            const isActive = button.dataset.tool === tool;
+            button.classList.toggle("active", isActive);
+            button.setAttribute("aria-pressed", String(isActive));
+            if (isActive) revealToolButton(button);
+        });
+    }
+
     toolbarButtons.forEach((btn) => {
         btn.addEventListener("click", () => {
             applyImageCrop();
             currentTool = btn.dataset.tool;
-            toolbarButtons.forEach(b => b.classList.toggle("active", b === btn));
+            setActiveToolButton(currentTool);
 
             updateCanvasCursor();
             updateControlVisibility();
         });
     });
+    setActiveToolButton(currentTool);
 
     // Pen / text UI handlers — also update selected shape if present
     function getShapeColorProperty(shape) {
@@ -4725,7 +5055,8 @@
 
     saveLocalButton.addEventListener("click", saveNamedDrawing);
 
-    // The Save/Import menu opens on hover and stays open once clicked.
+    // The toolbar menu (save, export, import) opens on hover and stays open
+    // once clicked.
     let saveMenuPinned = false;
     let saveMenuCloseTimer = null;
 
@@ -5726,7 +6057,7 @@
 
     function switchToSelectTool() {
         currentTool = "select";
-        toolbarButtons.forEach(b => b.classList.toggle("active", b.dataset.tool === "select"));
+        setActiveToolButton("select");
         updateCanvasCursor();
         updateControlVisibility();
     }
@@ -6950,6 +7281,14 @@
 
     showHelpButton.addEventListener("click", openHelp);
     helpCloseButton.addEventListener("click", closeHelp);
+
+    // On narrow screens the toolbar's Clear and shortcut-list buttons are
+    // hidden, and these menu items stand in for them.
+    menuShortcutsButton.addEventListener("click", openHelp);
+    menuClearButton.addEventListener("click", () => {
+        closeSaveMenu();
+        clearButton.click();
+    });
     helpBackdrop.addEventListener("mousedown", (e) => {
         if (e.target === helpBackdrop) closeHelp();
     });

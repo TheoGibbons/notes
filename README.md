@@ -24,9 +24,11 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Undo/Redo history
 - Save as a high-resolution PNG, JPEG, WebP, vector SVG or PDF — trimmed to your
   drawing, with your choice of resolution, padding and background — or
-  export/import JSON, from the **Save/Import** menu
+  export/import JSON, from the **☰** menu
 - Local saves stored in your browser, with full-canvas previews, rename and delete
 - Works the same on Windows, Linux and macOS (`Ctrl` or `Cmd`)
+- A compact icon toolbar that grows to touch size on phones and tablets, and
+  sharp drawing on high-resolution screens
 - Installable as an app (PWA) and fully usable offline
 
 ## How to Run
@@ -69,9 +71,20 @@ standard library, no dependencies). Regenerate them after changing the favicon:
 python tools/make-icons.py
 ```
 
+## Toolbar
+From the left: **Select/Move** and **Hand/Pan**; **Pen**, **Eraser** and
+**Text**; **Rectangle**, **Circle**, **Arrow** and **Line**; **Image**; then
+**Undo** and **Redo**. At the right-hand end are the keyboard-shortcut list, **Clear**
+(the bin) and the **☰** menu. Hover over a button to see its name and shortcut.
+
+The buttons are compact with a mouse and bigger on touch screens. On a narrow
+screen the bar stays one row high: the tools scroll sideways (swipe them, or
+scroll the mouse wheel over them; a chevron shows there are more), **Undo**,
+**Redo** and **☰** stay put, and **Clear** moves into the **☰** menu.
+
 ## Basic Usage
 Shortcuts below say `Ctrl`; on a Mac, `Cmd` works everywhere `Ctrl` does. Press
-`?` (or click **Shortcuts**) for the full list.
+`?` (or click the keyboard button in the toolbar) for the full list.
 
 - **Draw:** Select **Pen** or a shape tool, then click and drag on the canvas.
   The finished item remains selected for immediate editing while its drawing
@@ -144,7 +157,7 @@ Shortcuts below say `Ctrl`; on a Mac, `Cmd` works everywhere `Ctrl` does. Press
   (where you began dragging), the **End**, or **Both** ends.
 - **Fill text or shapes:** Choose **Fill** while using the Text, Rectangle, or
   Circle tool, or select existing items and change their fill together.
-- **Save an image:** Choose **Save Image…** from the **Save/Import** menu to pick
+- **Save an image:** Choose **Save Image…** from the **☰** menu to pick
   the file name, format, resolution, padding and background colour, or press
   `Ctrl+S` to skip the dialog and save a 2× PNG straight away. Either way the
   image is cropped to what you have drawn — the empty canvas around it is never
@@ -156,11 +169,13 @@ Shortcuts below say `Ctrl`; on a Mac, `Cmd` works everywhere `Ctrl` does. Press
     load.
 - **Open a drawing file:** Drop a `.json` file exported from **Export JSON** onto
   the canvas to open it, the same as **Import JSON**.
-- **Clear:** Click **Clear** (or press `Ctrl+N`) to wipe the canvas. Undo brings it back.
+- **Clear:** Click the bin in the toolbar (or press `Ctrl+N`) to wipe the canvas.
+  On a narrow screen, it's **Clear canvas** in the **☰** menu. Undo brings it back.
 
-## Save/Import Menu
-Hover over (or click) **Save/Import** in the toolbar to open it. Clicking pins the
-menu open; click again, press `Esc`, or click elsewhere to close it. It holds:
+## The ☰ Menu
+Hover over (or click) **☰** at the right-hand end of the toolbar to open it.
+Clicking pins the menu open; click again, press `Esc`, or click elsewhere to close
+it. It holds:
 
 - **Save Image…** — open the save dialog to download the drawing as an image.
 - **Export JSON** — download the drawing as data.
