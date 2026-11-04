@@ -65,6 +65,11 @@
         }
         .toolbar input[type="range"],
         .settings-panel input[type="range"] {
+            /* Sliders don't take the text-box border and padding above: with
+               them, the thumb stops short of both ends of the track. */
+            padding: 0;
+            border: 0;
+            background: transparent;
             cursor: pointer;
         }
         .toolbar input[type="text"] {
