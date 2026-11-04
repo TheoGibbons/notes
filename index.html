@@ -230,6 +230,8 @@
         #corner-container,
         #smoothing-container,
         #opacity-container,
+        #eraser-mode-container,
+        #eraser-size-container,
         #text-size-container {
             display: none;
             align-items: center;
@@ -288,19 +290,22 @@
         .settings-panel #layer-container,
         .settings-panel #crop-container,
         .settings-panel #arrow-head-container,
-        .settings-panel #dash-container {
+        .settings-panel #dash-container,
+        .settings-panel #eraser-mode-container {
             flex-wrap: wrap;
         }
         .settings-panel #layer-container .group-label,
         .settings-panel #crop-container .group-label,
         .settings-panel #arrow-head-container .group-label,
-        .settings-panel #dash-container .group-label {
+        .settings-panel #dash-container .group-label,
+        .settings-panel #eraser-mode-container .group-label {
             flex-basis: 100%;
         }
         .settings-panel #layer-container button,
         .settings-panel #crop-container button,
         .settings-panel #arrow-head-container button,
-        .settings-panel #dash-container button {
+        .settings-panel #dash-container button,
+        .settings-panel #eraser-mode-container button {
             flex: 1;
             white-space: nowrap;
         }
@@ -526,6 +531,24 @@
         .zoom-controls #zoom-fit {
             border-left: 1px solid #e3e3e3;
         }
+        /* The eraser's footprint follows the pointer */
+        .eraser-cursor {
+            position: fixed;
+            left: 0;
+            top: 0;
+            z-index: 15;
+            border: 1px solid rgb(0 0 0 / 70%);
+            border-radius: 50%;
+            background: rgb(255 255 255 / 30%);
+            box-shadow: 0 0 0 1px rgb(255 255 255 / 85%);
+            pointer-events: none;
+        }
+        .eraser-cursor[hidden] {
+            display: none;
+        }
+        #canvas.drawing-pad.eraser-mode.eraser-cursor-visible {
+            cursor: none;
+        }
 
         .toolbar>* {
             zoom: 0.6;
@@ -638,6 +661,20 @@
         <output class="setting-value" id="opacity-value" for="opacity">100%</output>
     </div>
 
+    <div id="eraser-mode-container" class="inline-group" role="group" aria-labelledby="eraser-mode-label">
+        <span class="group-label" id="eraser-mode-label">Erase:</span>
+        <button type="button" data-eraser-mode="partial" aria-pressed="true"
+                title="Rub out only the part of a pen stroke the eraser touches">Part of stroke</button>
+        <button type="button" data-eraser-mode="whole" aria-pressed="false"
+                title="Remove each item the eraser touches">Whole item</button>
+    </div>
+
+    <div id="eraser-size-container" class="inline-group">
+        <label class="group-label" for="eraser-size">Eraser size:</label>
+        <input type="range" id="eraser-size" min="4" max="120" value="20" />
+        <output class="setting-value" id="eraser-size-value" for="eraser-size">20 px</output>
+    </div>
+
     <div id="arrow-head-container" class="inline-group" role="group" aria-labelledby="arrow-head-label">
         <span class="group-label" id="arrow-head-label">Arrowhead:</span>
         <button type="button" data-arrow-head="start" aria-pressed="false"
@@ -675,6 +712,8 @@
     <button type="button" id="zoom-in" title="Zoom in (Ctrl+=)" aria-label="Zoom in">+</button>
     <button type="button" id="zoom-fit" title="Zoom to fit everything (Space)">Fit</button>
 </div>
+
+<div class="eraser-cursor" id="eraser-cursor" hidden></div>
 
 <div class="dialog-backdrop" id="save-image-backdrop" hidden>
     <form class="dialog" id="save-image-dialog" role="dialog" aria-modal="true"
@@ -815,6 +854,12 @@
     const opacityContainer = document.getElementById("opacity-container");
     const opacityInput = document.getElementById("opacity");
     const opacityValue = document.getElementById("opacity-value");
+    const eraserModeContainer = document.getElementById("eraser-mode-container");
+    const eraserModeButtons = eraserModeContainer.querySelectorAll("button[data-eraser-mode]");
+    const eraserSizeContainer = document.getElementById("eraser-size-container");
+    const eraserSizeInput = document.getElementById("eraser-size");
+    const eraserSizeValue = document.getElementById("eraser-size-value");
+    const eraserCursor = document.getElementById("eraser-cursor");
 
     const zoomOutButton = document.getElementById("zoom-out");
     const zoomResetButton = document.getElementById("zoom-reset");
@@ -1092,7 +1137,9 @@
     let groupTransform = null;
     const GROUP_BOX_PAD_SCREEN = 6;
     let resizeStartPoints = null;  // a pen stroke's points when its resize began
+    let lastEraserWorld = null;    // where the eraser was on the previous move
     let lastPointerClient = null;  // last known mouse position, in client px
+    let pointerOverCanvas = false;
     const ANGLE_SNAP = Math.PI / 12; // Shift snaps angles to 15° steps
 
     function snapAngle(angle) {
@@ -1110,7 +1157,8 @@
     let dashStyle = "solid";
     let cornerRadius = 0;       // world units
     let penSmoothing = 50;      // 0..100, for new pen strokes
-    const ERASER_RADIUS = 10;   // screen px
+    let eraserSize = 20;        // diameter, screen px
+    let eraserMode = "partial"; // 'partial' rubs out part of a stroke, 'whole' removes items
     const HIT_TEST_RADIUS = 8;  // screen px
 
     // Text editing overlay state
@@ -2454,6 +2502,15 @@
         smoothingValue.textContent = `${penSmoothing}%`;
     }
 
+    function updateEraserVisibility() {
+        const isEraser = currentTool === "eraser";
+        eraserModeContainer.style.display = isEraser ? "inline-flex" : "none";
+        eraserSizeContainer.style.display = isEraser ? "inline-flex" : "none";
+        setPressed(eraserModeButtons, "eraserMode", eraserMode);
+        eraserSizeInput.value = String(eraserSize);
+        eraserSizeValue.textContent = `${eraserSize} px`;
+    }
+
     function updateArrowHeadVisibility() {
         const arrows = selectedShapesWith(s => s.type === "arrow");
         if (currentTool === "select" && arrows.length) {
@@ -2500,6 +2557,8 @@
             cornerContainer,
             smoothingContainer,
             opacityContainer,
+            eraserModeContainer,
+            eraserSizeContainer,
             arrowHeadContainer,
             textSizeContainer,
             layerContainer,
@@ -2519,10 +2578,12 @@
         updateCornerVisibility();
         updateSmoothingVisibility();
         updateOpacityVisibility();
+        updateEraserVisibility();
         updateArrowHeadVisibility();
         updateLayerVisibility();
         updateCropVisibility();
         updateSettingsPanelVisibility();
+        updateEraserCursor();
     }
 
     function isTransformableShape(shape) {
@@ -2780,6 +2841,19 @@
             }
             updateDashVisibility();
         });
+    });
+
+    eraserModeButtons.forEach(button => {
+        button.addEventListener("click", () => {
+            eraserMode = button.dataset.eraserMode;
+            updateEraserVisibility();
+        });
+    });
+
+    eraserSizeInput.addEventListener("input", () => {
+        eraserSize = Number(eraserSizeInput.value);
+        eraserSizeValue.textContent = `${eraserSize} px`;
+        updateEraserCursor();
     });
 
     // Initialize controls
@@ -4375,31 +4449,177 @@
     }
 
     // Erasing
-    function eraseAt(x, y) {
-        const scale = camera.scale || 1;
-        const radiusWorld = ERASER_RADIUS / scale;
-
-        for (let i = shapes.length - 1; i >= 0; i--) {
-            const s = shapes[i];
-            let hit = false;
-
-            if (s.type === "stroke") {
-                hit = hitTestStroke(s, x, y, radiusWorld);
-            } else if (s.type === "text") {
-                hit = hitTestText(s, x, y, radiusWorld);
-            } else if (s.type === "rect" || s.type === "image" || isSegmentShape(s)) {
-                hit = hitTestRectLike(s, x, y, radiusWorld);
-            } else if (s.type === "circle") {
-                hit = hitTestCircleShape(s, x, y, radiusWorld);
-            }
-
-            if (hit) {
-                shapes.splice(i, 1);
-                deselectShape(s);
-                eraseChanged = true;
-                break;
-            }
+    function hitTestShape(shape, x, y, radiusWorld) {
+        if (shape.type === "stroke") return hitTestStroke(shape, x, y, radiusWorld);
+        if (shape.type === "text") return hitTestText(shape, x, y, radiusWorld);
+        if (shape.type === "rect" || shape.type === "image" || isSegmentShape(shape)) {
+            return hitTestRectLike(shape, x, y, radiusWorld);
         }
+        if (shape.type === "circle") return hitTestCircleShape(shape, x, y, radiusWorld);
+        return false;
+    }
+
+    // A stroke's points with its rotation applied, so pieces cut from it can
+    // be stored unrotated without moving.
+    function getStrokeWorldPoints(stroke) {
+        const rotation = stroke.rotation || 0;
+        if (!rotation) return stroke.points.map(p => ({ x: p.x, y: p.y }));
+        const bounds = getShapeBounds(stroke);
+        const cos = Math.cos(rotation);
+        const sin = Math.sin(rotation);
+        return stroke.points.map(p => {
+            const dx = p.x - bounds.x;
+            const dy = p.y - bounds.y;
+            return { x: bounds.x + dx * cos - dy * sin, y: bounds.y + dx * sin + dy * cos };
+        });
+    }
+
+    // Cut away the part of a pen stroke inside a circle. Returns the strokes
+    // left over (possibly none), or null when the circle misses the stroke.
+    function eraseStrokeInCircle(stroke, cx, cy, radius) {
+        // Reach the stroke's visible edge, not just its centre line.
+        const reach = radius + (stroke.width || 0) / 2;
+        if (!hitTestStroke(stroke, cx, cy, reach)) return null;
+
+        const points = getStrokeWorldPoints(stroke);
+        const reachSquared = reach * reach;
+        const pieces = [];
+        let current = [];
+
+        for (let i = 0; i < points.length - 1; i++) {
+            const a = points[i];
+            const b = points[i + 1];
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const fx = a.x - cx;
+            const fy = a.y - cy;
+            const lengthSquared = dx * dx + dy * dy;
+
+            // The part of this segment inside the circle, as t in [enter, exit].
+            let enter = Infinity;
+            let exit = -Infinity;
+            if (lengthSquared > 0) {
+                const half = fx * dx + fy * dy;
+                const discriminant = half * half - lengthSquared * (fx * fx + fy * fy - reachSquared);
+                if (discriminant > 0) {
+                    const root = Math.sqrt(discriminant);
+                    enter = Math.max(0, (-half - root) / lengthSquared);
+                    exit = Math.min(1, (-half + root) / lengthSquared);
+                }
+            } else if (fx * fx + fy * fy < reachSquared) {
+                enter = 0;
+                exit = 1;
+            }
+
+            if (enter >= exit) {
+                // Untouched segment.
+                if (!current.length) current.push(a);
+                current.push(b);
+                continue;
+            }
+            if (enter > 0) {
+                if (!current.length) current.push(a);
+                current.push({ x: a.x + dx * enter, y: a.y + dy * enter });
+            }
+            if (current.length) pieces.push(current);
+            current = exit < 1 ? [{ x: a.x + dx * exit, y: a.y + dy * exit }, b] : [];
+        }
+        if (current.length) pieces.push(current);
+
+        return pieces
+            .filter(piece => piece.length > 1)
+            .map(piece => ({ ...stroke, points: piece, rotation: 0 }));
+    }
+
+    // Erase at one point among the candidate shapes (kept in drawing order),
+    // returning the candidates that remain.
+    function eraseAt(candidates, x, y, radiusWorld) {
+        if (eraserMode === "whole") {
+            // Whole-item mode removes the topmost item under the eraser.
+            for (let i = candidates.length - 1; i >= 0; i--) {
+                const shape = candidates[i];
+                const index = shapes.indexOf(shape);
+                if (index === -1 || !hitTestShape(shape, x, y, radiusWorld)) continue;
+                shapes.splice(index, 1);
+                deselectShape(shape);
+                eraseChanged = true;
+                return candidates.filter(s => s !== shape);
+            }
+            return candidates;
+        }
+
+        // Part-of-stroke mode trims every pen stroke it touches. Other items
+        // can't be partly erased, so touching them removes them.
+        const remaining = [];
+        for (const shape of candidates) {
+            const index = shapes.indexOf(shape);
+            if (index === -1) continue;
+            if (shape.type === "stroke") {
+                const pieces = eraseStrokeInCircle(shape, x, y, radiusWorld);
+                if (pieces === null) {
+                    remaining.push(shape);
+                    continue;
+                }
+                shapes.splice(index, 1, ...pieces);
+                remaining.push(...pieces);
+            } else if (hitTestShape(shape, x, y, radiusWorld)) {
+                shapes.splice(index, 1);
+            } else {
+                remaining.push(shape);
+                continue;
+            }
+            deselectShape(shape);
+            eraseChanged = true;
+        }
+        return remaining;
+    }
+
+    // Erase along the path from the previous eraser position, in steps no
+    // longer than half the eraser, so a fast drag doesn't skip over strokes.
+    function eraseAlong(from, to) {
+        const radiusWorld = eraserSize / 2 / (camera.scale || 1);
+        const start = from || to;
+        const reach = radiusWorld + 1;
+        const sweep = {
+            minX: Math.min(start.x, to.x) - reach,
+            minY: Math.min(start.y, to.y) - reach,
+            maxX: Math.max(start.x, to.x) + reach,
+            maxY: Math.max(start.y, to.y) + reach,
+        };
+        // Only shapes the sweep can reach need testing at each step.
+        let candidates = shapes.filter(shape => {
+            const extent = getShapeWorldExtent(shape);
+            return extent && extent.minX <= sweep.maxX && extent.maxX >= sweep.minX &&
+                extent.minY <= sweep.maxY && extent.maxY >= sweep.minY;
+        });
+        if (!candidates.length) return;
+
+        const distance = Math.hypot(to.x - start.x, to.y - start.y);
+        const steps = Math.max(1, Math.ceil(distance / Math.max(radiusWorld * 0.5, 1e-6)));
+        for (let i = from ? 1 : steps; i <= steps; i++) {
+            const t = i / steps;
+            candidates = eraseAt(
+                candidates,
+                start.x + (to.x - start.x) * t,
+                start.y + (to.y - start.y) * t,
+                radiusWorld,
+            );
+            if (!candidates.length) break;
+        }
+    }
+
+    // The eraser's footprint follows the mouse while the Eraser is active.
+    function updateEraserCursor() {
+        const visible = currentTool === "eraser" && !!lastPointerClient && !cropSession &&
+            (pointerOverCanvas || (isDrawing && currentTool === "eraser"));
+        eraserCursor.hidden = !visible;
+        canvas.classList.toggle("eraser-cursor-visible", visible);
+        if (!visible) return;
+        const size = eraserSize;
+        eraserCursor.style.width = `${size}px`;
+        eraserCursor.style.height = `${size}px`;
+        eraserCursor.style.transform =
+            `translate(${lastPointerClient.x - size / 2}px, ${lastPointerClient.y - size / 2}px)`;
     }
 
     // Shared interaction helpers
@@ -4924,7 +5144,9 @@
         } else if (currentTool === "eraser") {
             isDrawing = true;
             eraseChanged = false;
-            eraseAt(world.x, world.y);
+            lastEraserWorld = null;
+            eraseAlong(null, world);
+            lastEraserWorld = { ...world };
             render();
         } else if (currentTool === "select") {
             const hit = hitTestShapes(world.x, world.y);
@@ -5006,7 +5228,8 @@
             updateDraftShape(world, shiftKey);
             render();
         } else if (currentTool === "eraser" && isDrawing) {
-            eraseAt(world.x, world.y);
+            eraseAlong(lastEraserWorld, world);
+            lastEraserWorld = { ...world };
             render();
         } else if (isMarqueeSelecting && !isPanning) {
             // Checked before the branch below: the marquee owns the pointer even
@@ -5240,6 +5463,7 @@
         }
 
         isDrawing = false;
+        lastEraserWorld = null;
         resizeStartPoints = null;
         isPanning = false;
         isDraggingSelection = false;
@@ -5294,6 +5518,8 @@
     // the canvas (or the browser window) and only ends on a real mouse up.
     window.addEventListener("mousemove", (e) => {
         lastPointerClient = { x: e.clientX, y: e.clientY };
+        pointerOverCanvas = e.target === canvas;
+        if (currentTool === "eraser") updateEraserCursor();
         if (!hasActiveMouseInteraction()) return;
 
         // The button was released outside the window: end the interaction
@@ -5310,6 +5536,12 @@
     window.addEventListener("mouseup", () => {
         if (!hasActiveMouseInteraction()) return;
         stopAllInteractions();
+        updateEraserCursor();
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+        pointerOverCanvas = false;
+        updateEraserCursor();
     });
 
     // Pressing or releasing Shift mid-drag re-applies the constraint at once,
