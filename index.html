@@ -446,6 +446,38 @@
             overflow: hidden;
             resize: none;
         }
+        /* Saved-drawing rows: load on the name, rename/delete beside it */
+        .menu-save-row {
+            display: flex;
+            align-items: center;
+        }
+        .toolbar .menu-panel .menu-save-row > button.menu-save-load {
+            flex: 1;
+            min-width: 0;
+            width: auto;
+        }
+        .toolbar .menu-panel .menu-save-row > button.menu-save-action {
+            flex: none;
+            width: auto;
+            padding: 4px 7px;
+            color: #666;
+            opacity: 0;
+        }
+        .toolbar .menu-panel .menu-save-row:hover > button.menu-save-action,
+        .toolbar .menu-panel .menu-save-row:focus-within > button.menu-save-action {
+            opacity: 1;
+        }
+        @media (hover: none) {
+            .toolbar .menu-panel .menu-save-row > button.menu-save-action {
+                opacity: 1;
+            }
+        }
+        .toolbar .menu-panel .menu-save-row > button.menu-save-action:hover {
+            color: #000;
+        }
+        .toolbar .menu-panel .menu-save-row > button.menu-save-action.danger:hover {
+            color: #c00;
+        }
 
         .toolbar>* {
             zoom: 0.6;
@@ -714,23 +746,42 @@
     let cleanShapesSnapshot = JSON.stringify(shapes);
     let isDirty = false;
 
-    // History (undo/redo) – shapes only
+    // History (undo/redo) – shapes only. `historyShapeCounts` runs alongside it
+    // so a step that removes most of the board can be spotted without parsing.
     let history = [];
+    let historyShapeCounts = [];
     let historyIndex = -1;
 
     function cloneShapes(value) {
         return JSON.parse(JSON.stringify(value));
     }
 
+    function resetHistory() {
+        history = [];
+        historyShapeCounts = [];
+        historyIndex = -1;
+    }
+
     function pushHistory() {
         const snapshot = JSON.stringify(shapes);
+        const previousSnapshot = history[historyIndex];
+        const previousCount = historyShapeCounts[historyIndex] ?? 0;
         if (historyIndex < history.length - 1) {
             history.splice(historyIndex + 1);
+            historyShapeCounts.splice(historyIndex + 1);
         }
         history.push(snapshot);
+        historyShapeCounts.push(shapes.length);
         historyIndex = history.length - 1;
         updateDirtyState();
         updateHistoryButtons();
+
+        // Clear, Ctrl+N, or deleting more than half the board in one go keeps
+        // the autosave it was writing to and starts a new one, so whatever was
+        // just removed can still be found under Autosaves.
+        if (previousSnapshot !== undefined && shapes.length < previousCount / 2) {
+            rollOverAutosave(previousSnapshot);
+        }
     }
 
     function updateDirtyState() {
@@ -1926,6 +1977,11 @@
     // Local saves
     let saves = {};
     let currentSaveName = "Drawing 1";
+    // The autosave this session keeps overwriting. Null means the next
+    // autosave starts a new entry: after a page load, opening another drawing,
+    // or a Clear / big delete (see rollOverAutosave).
+    let currentAutosaveName = null;
+    const pendingSaveNames = new Set(); // queued writes not yet in `saves`
     let saveSuccessTimeout = null;
     let saveOperationQueue = Promise.resolve();
     let saveDatabasePromise = null;
@@ -2834,8 +2890,8 @@
             shapes = imported.shapes;
             camera = imported.camera;
             clearSelection();
-            history = [];
-            historyIndex = -1;
+            currentAutosaveName = null; // a different drawing gets its own autosave
+            resetHistory();
             pushHistory();
 
             const baseName = file.name.replace(/\.json$/i, "") || "Imported drawing";
@@ -3036,9 +3092,43 @@
         namedSaves.forEach(name => localSavesList.appendChild(createSaveItem(name)));
     }
 
+    // One row per save: its name loads it, and the two small buttons beside
+    // it rename (or, for an autosave, keep it under a name) and delete it.
     function createSaveItem(name) {
+        const row = document.createElement("div");
+        row.className = "menu-save-row";
+        row.appendChild(createSaveLoadButton(name));
+
+        const autosave = isAutosaveName(name);
+        const actions = [
+            {
+                text: "✎",
+                label: autosave ? `Keep "${name}" as a named save` : `Rename "${name}"`,
+                run: () => renameSave(name),
+            },
+            { text: "✕", label: `Delete "${name}"`, run: () => deleteSave(name), danger: true },
+        ];
+        for (const action of actions) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "menu-save-action";
+            if (action.danger) button.classList.add("danger");
+            button.textContent = action.text;
+            button.title = action.label;
+            button.setAttribute("aria-label", action.label);
+            button.addEventListener("click", (e) => {
+                e.stopPropagation();
+                action.run();
+            });
+            row.appendChild(button);
+        }
+        return row;
+    }
+
+    function createSaveLoadButton(name) {
         const item = document.createElement("button");
         item.type = "button";
+        item.className = "menu-save-load";
         item.setAttribute("role", "menuitem");
         if (isAutosaveName(name)) item.classList.add("autosave-option");
         // Autosave names already carry their timestamp — don't repeat it.
@@ -3104,14 +3194,29 @@
         }, 1500);
     }
 
-    function storeDrawing(name, options = {}) {
-        const operation = () => performStoreDrawing(name, options);
+    // Storage work runs one operation at a time, in the order it was asked for.
+    function queueSaveOperation(operation) {
         const result = saveOperationQueue.then(operation, operation);
         saveOperationQueue = result.then(() => undefined, () => undefined);
         return result;
     }
 
-    async function performStoreDrawing(name, { showSuccess = false, showError = false } = {}) {
+    // Save the drawing as it is right now (or `snapshotJson`, an earlier
+    // state) under `name`. `replaces` names a save this one supersedes.
+    function storeDrawing(name, { snapshotJson = JSON.stringify(shapes), ...options } = {}) {
+        // Take the snapshot now: the queue may only run this once the drawing
+        // has moved on.
+        const snapshot = { json: snapshotJson, camera: { ...camera } };
+        pendingSaveNames.add(name);
+        return queueSaveOperation(() => performStoreDrawing(name, snapshot, options))
+            .finally(() => pendingSaveNames.delete(name));
+    }
+
+    async function performStoreDrawing(name, snapshot, {
+        showSuccess = false,
+        showError = false,
+        replaces = null,
+    } = {}) {
         if (!await savesReady) {
             if (showError) alert("Persistent drawing storage is unavailable in this browser.");
             return false;
@@ -3120,11 +3225,12 @@
         const nextSaves = {
             ...saves,
             [name]: {
-                shapes: cloneShapes(shapes),
-                camera: { ...camera },
+                shapes: JSON.parse(snapshot.json),
+                camera: snapshot.camera,
                 updatedAt: new Date().toISOString(),
             },
         };
+        if (replaces && replaces !== name) delete nextSaves[replaces];
         pruneAutosaves(nextSaves);
 
         const removedSaveNames = Object.keys(saves)
@@ -3142,9 +3248,31 @@
 
         saves = nextSaves;
         refreshSavesMenu();
-        markCurrentDrawingClean();
+        // Clean means "matches what was saved", which the drawing may already
+        // have moved on from.
+        cleanShapesSnapshot = snapshot.json;
+        updateDirtyState();
         if (showSuccess) flashSaveSuccess();
         return true;
+    }
+
+    // Autosave names carry their time; two in the same second get a number.
+    function nextAutosaveName(replacing = null) {
+        const base = `Autosave (${formatSaveTimestamp(new Date())})`;
+        let name = base;
+        for (let n = 2; name !== replacing && (saves[name] || pendingSaveNames.has(name)); n++) {
+            name = `${base} ${n}`;
+        }
+        return name;
+    }
+
+    // Each autosave overwrites the previous one from this session, so the
+    // list holds one entry per drawing session rather than one per 30 s.
+    function writeAutosave(snapshotJson, showError = false) {
+        const replaces = currentAutosaveName;
+        const name = nextAutosaveName(replaces);
+        currentAutosaveName = name;
+        return storeDrawing(name, { snapshotJson, replaces, showError });
     }
 
     async function autosaveIfDirty(showError = false) {
@@ -3152,9 +3280,89 @@
             currentTextEditor.shape.text = currentTextEditor.input.value || "";
         }
         updateDirtyState();
-        if (!isDirty) return true;
-        const autosaveName = `Autosave (${formatSaveTimestamp(new Date())})`;
-        return storeDrawing(autosaveName, { showError });
+        // An empty board has nothing worth keeping.
+        if (!isDirty || shapes.length === 0) return true;
+        return writeAutosave(JSON.stringify(shapes), showError);
+    }
+
+    // Called when most of the board disappears in one step. `previousJson` is
+    // the board just before: it goes into the current autosave (if that
+    // doesn't already have it), and the next autosave starts a new entry.
+    function rollOverAutosave(previousJson) {
+        if (previousJson && previousJson !== "[]" && previousJson !== cleanShapesSnapshot) {
+            writeAutosave(previousJson);
+        }
+        currentAutosaveName = null;
+    }
+
+    async function renameSave(oldName) {
+        clearSavePreview();
+        let suggestion = isAutosaveName(oldName) ? "" : oldName;
+        for (;;) {
+            const entered = prompt(
+                isAutosaveName(oldName)
+                    ? "Keep this autosave as a named save called:"
+                    : `Rename "${oldName}" to:`,
+                suggestion,
+            );
+            if (entered === null) return; // cancelled
+            const name = entered.trim();
+            if (!name) {
+                alert("Please enter a name for the save.");
+                suggestion = "";
+                continue;
+            }
+            if (isAutosaveName(name)) {
+                alert('Save names cannot begin with "Autosave".');
+                suggestion = name;
+                continue;
+            }
+            if (name === oldName) return;
+            if (saves[name] && !confirm(`There is already a save called "${name}". Replace it?`)) {
+                suggestion = name;
+                continue;
+            }
+
+            try {
+                await queueSaveOperation(async () => {
+                    const record = saves[oldName];
+                    if (!record) return;
+                    await writeSaveRecords([{ ...record, name }]);
+                    await deleteSaveRecords([oldName]);
+                    const nextSaves = { ...saves, [name]: record };
+                    delete nextSaves[oldName];
+                    saves = nextSaves;
+                });
+            } catch (error) {
+                console.error("Could not rename the save", error);
+                alert("The save could not be renamed.");
+                return;
+            }
+            if (currentSaveName === oldName) currentSaveName = name;
+            // A renamed autosave is a named save now; autosaving starts afresh.
+            if (currentAutosaveName === oldName) currentAutosaveName = null;
+            refreshSavesMenu();
+            return;
+        }
+    }
+
+    async function deleteSave(name) {
+        clearSavePreview();
+        if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+        try {
+            await queueSaveOperation(async () => {
+                await deleteSaveRecords([name]);
+                const nextSaves = { ...saves };
+                delete nextSaves[name];
+                saves = nextSaves;
+            });
+        } catch (error) {
+            console.error("Could not delete the save", error);
+            alert("The save could not be deleted.");
+            return;
+        }
+        if (currentAutosaveName === name) currentAutosaveName = null;
+        refreshSavesMenu();
     }
 
     async function saveNamedDrawing() {
@@ -3199,9 +3407,11 @@
         camera = save.camera ? { ...save.camera } : { x: 0, y: 0, scale: 1 };
         if (camera.scale == null) camera.scale = 1;
         clearSelection();
+        // Carrying on with an autosave keeps writing to it; any other drawing
+        // starts its own autosave the first time it changes.
+        currentAutosaveName = isAutosaveName(name) ? name : null;
 
-        history = [];
-        historyIndex = -1;
+        resetHistory();
         pushHistory();
         updateControlVisibility();
         render();
