@@ -765,6 +765,8 @@
                 <option value="png">PNG</option>
                 <option value="jpeg">JPEG</option>
                 <option value="webp">WebP</option>
+                <option value="svg">SVG (vector)</option>
+                <option value="pdf">PDF</option>
             </select>
         </div>
 
@@ -3240,6 +3242,11 @@
         png: { mime: "image/png", extension: "png", transparency: true },
         jpeg: { mime: "image/jpeg", extension: "jpg", transparency: false, quality: 0.98 },
         webp: { mime: "image/webp", extension: "webp", transparency: true, quality: 0.98 },
+        // Vector: resolution doesn't apply.
+        svg: { mime: "image/svg+xml", extension: "svg", transparency: true, vector: true },
+        // One page holding the drawing as a high-quality JPEG; no PDF library
+        // needed. JPEG has no transparency, so the page gets a background.
+        pdf: { mime: "application/pdf", extension: "pdf", transparency: false },
     };
 
     function getImageFormat(name) {
@@ -3482,17 +3489,269 @@
         // Commit any crop first so its overlay is not baked into the image.
         applyImageCrop();
 
+        const base = (fileName || "").trim().replace(/[\\/:*?"<>|]+/g, "-") || "drawing";
+        const downloadName = `${base}.${getImageFormat(format).extension}`;
+
+        if (format === "svg") {
+            const svg = buildSvgDocument({ padding, background });
+            if (!svg) return false;
+            downloadBlob(new Blob([svg], { type: "image/svg+xml" }), downloadName);
+            return true;
+        }
+        if (format === "pdf") {
+            const size = getSaveImageSize(padding, scale);
+            const dataUrl = renderDrawingToDataUrl({
+                padding, scale, format: "jpeg", background: background || "#ffffff",
+            });
+            if (!size || !dataUrl) return false;
+            // Page size in points (1/72 in) for the drawing at 1× (96 px/in).
+            const pageWidth = size.width / size.scale * 0.75;
+            const pageHeight = size.height / size.scale * 0.75;
+            downloadBlob(
+                buildPdfFromJpeg(dataUrlToBytes(dataUrl), size.width, size.height, pageWidth, pageHeight),
+                downloadName,
+            );
+            return true;
+        }
+
         const dataUrl = renderDrawingToDataUrl({ padding, scale, format, background });
         if (!dataUrl) return false;
+        downloadUrl(dataUrl, downloadName);
+        return true;
+    }
 
-        const base = (fileName || "").trim().replace(/[\\/:*?"<>|]+/g, "-") || "drawing";
+    function downloadUrl(url, fileName) {
         const link = document.createElement("a");
-        link.href = dataUrl;
-        link.download = `${base}.${getImageFormat(format).extension}`;
+        link.href = url;
+        link.download = fileName;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        return true;
+    }
+
+    function downloadBlob(blob, fileName) {
+        const url = URL.createObjectURL(blob);
+        downloadUrl(url, fileName);
+        // Give the download a moment to start before releasing the data.
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+
+    function dataUrlToBytes(dataUrl) {
+        const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+    }
+
+    // A minimal one-page PDF showing a JPEG across the whole page. PDF can
+    // embed JPEG data as-is (DCTDecode), so no encoder or library is needed.
+    function buildPdfFromJpeg(jpegBytes, pixelWidth, pixelHeight, pageWidth, pageHeight) {
+        const encoder = new TextEncoder();
+        const chunks = [];
+        const offsets = [];
+        let length = 0;
+        const add = (data) => {
+            const bytes = typeof data === "string" ? encoder.encode(data) : data;
+            chunks.push(bytes);
+            length += bytes.length;
+        };
+        const object = (id, body) => {
+            offsets[id] = length;
+            add(`${id} 0 obj\n${body}\nendobj\n`);
+        };
+        const width = pageWidth.toFixed(2);
+        const height = pageHeight.toFixed(2);
+
+        add("%PDF-1.4\n");
+        object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+        object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+        object(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] ` +
+            "/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>");
+        offsets[4] = length;
+        add(`4 0 obj\n<< /Type /XObject /Subtype /Image /Width ${pixelWidth} /Height ${pixelHeight} ` +
+            `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
+        add(jpegBytes);
+        add("\nendstream\nendobj\n");
+        const content = `q\n${width} 0 0 ${height} 0 0 cm\n/Im0 Do\nQ\n`;
+        object(5, `<< /Length ${content.length} >>\nstream\n${content}endstream`);
+
+        const xrefOffset = length;
+        let xref = "xref\n0 6\n0000000000 65535 f \n";
+        for (let id = 1; id <= 5; id++) xref += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+        add(xref);
+        add(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+        return new Blob(chunks, { type: "application/pdf" });
+    }
+
+    // --- SVG export ---------------------------------------------------------
+    // The drawing as vector shapes in world units, matching what the canvas
+    // draws: same dashes, corners, smoothing, opacity, crops and rotations.
+    function svgNumber(value) {
+        return String(Math.round(value * 100) / 100);
+    }
+
+    function escapeXml(value) {
+        return String(value)
+            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+    }
+
+    // Canvas draws text from the top of the em box; SVG places text on its
+    // baseline. Measure the gap once (per 100 px) and scale it.
+    let textBaselineRatio = null;
+    function getTextBaselineOffset(fontSize) {
+        if (textBaselineRatio === null) {
+            ctx.save();
+            ctx.font = "100px sans-serif";
+            ctx.textBaseline = "top";
+            const fromTop = ctx.measureText("H").actualBoundingBoxAscent;
+            ctx.textBaseline = "alphabetic";
+            const fromBaseline = ctx.measureText("H").actualBoundingBoxAscent;
+            ctx.restore();
+            const ratio = (fromBaseline - fromTop) / 100;
+            textBaselineRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 0.8;
+        }
+        return textBaselineRatio * fontSize;
+    }
+
+    // Dashes always use round caps; `roundCapsAlready` skips repeating the
+    // attribute on elements that set it themselves.
+    function svgDashAttributes(shape, lineWidth, roundCapsAlready = false) {
+        const pattern = getDashPattern(getDashStyle(shape), lineWidth);
+        if (!pattern.length) return "";
+        return ` stroke-dasharray="${pattern.map(svgNumber).join(" ")}"` +
+            (roundCapsAlready ? "" : ` stroke-linecap="round"`);
+    }
+
+    function svgStrokePath(stroke) {
+        const points = stroke.points;
+        const coords = getSmoothedStrokeCoords(stroke);
+        const x = i => svgNumber(coords ? coords[i * 2] : points[i].x);
+        const y = i => svgNumber(coords ? coords[i * 2 + 1] : points[i].y);
+        const xs = i => coords ? coords[i * 2] : points[i].x;
+        const ys = i => coords ? coords[i * 2 + 1] : points[i].y;
+        let d = `M${x(0)} ${y(0)}`;
+        if (points.length === 1) return `${d}L${x(0)} ${y(0)}`;
+        if (!coords) {
+            for (let i = 1; i < points.length; i++) d += `L${x(i)} ${y(i)}`;
+            return d;
+        }
+        for (let i = 1; i < points.length - 1; i++) {
+            d += `Q${x(i)} ${y(i)} ${svgNumber((xs(i) + xs(i + 1)) / 2)} ${svgNumber((ys(i) + ys(i + 1)) / 2)}`;
+        }
+        return `${d}L${x(points.length - 1)} ${y(points.length - 1)}`;
+    }
+
+    function shapeToSvg(shape) {
+        const opacity = getShapeOpacity(shape);
+        const opacityAttribute = opacity < 1 ? ` opacity="${svgNumber(opacity)}"` : "";
+        const degrees = svgNumber((shape.rotation || 0) * 180 / Math.PI);
+        const place = (x, y) => ` transform="translate(${svgNumber(x)} ${svgNumber(y)}) rotate(${degrees})"`;
+
+        if (shape.type === "stroke") {
+            const bounds = getShapeBounds(shape);
+            if (!bounds || !shape.points.length) return "";
+            const rotate = shape.rotation
+                ? ` transform="rotate(${degrees} ${svgNumber(bounds.x)} ${svgNumber(bounds.y)})"`
+                : "";
+            return `<path d="${svgStrokePath(shape)}" fill="none" stroke="${escapeXml(shape.color || "#000000")}"` +
+                ` stroke-width="${svgNumber(shape.width)}" stroke-linecap="round" stroke-linejoin="round"` +
+                `${svgDashAttributes(shape, shape.width, true)}${opacityAttribute}${rotate}/>`;
+        }
+
+        if (shape.type === "rect" || shape.type === "circle") {
+            const fill = shape.fillColor ? escapeXml(shape.fillColor) : "none";
+            const paint = ` fill="${fill}" stroke="${escapeXml(shape.strokeColor || "#000000")}"` +
+                ` stroke-width="${svgNumber(shape.strokeWidth)}"${svgDashAttributes(shape, shape.strokeWidth)}`;
+            if (shape.type === "circle") {
+                return `<ellipse cx="0" cy="0" rx="${svgNumber(shape.rx)}" ry="${svgNumber(shape.ry)}"` +
+                    `${paint}${opacityAttribute}${place(shape.x, shape.y)}/>`;
+            }
+            const radius = Math.min(getCornerRadius(shape), shape.width / 2, shape.height / 2);
+            const corners = radius > 0 ? ` rx="${svgNumber(radius)}" ry="${svgNumber(radius)}"` : "";
+            return `<rect x="${svgNumber(-shape.width / 2)}" y="${svgNumber(-shape.height / 2)}"` +
+                ` width="${svgNumber(shape.width)}" height="${svgNumber(shape.height)}"${corners}` +
+                `${paint}${opacityAttribute}${place(shape.x, shape.y)}/>`;
+        }
+
+        if (isSegmentShape(shape)) {
+            const half = (shape.length || 0) / 2;
+            const color = escapeXml(shape.strokeColor || "#000000");
+            const headStyle = shape.type === "arrow" ? getArrowHeadStyle(shape) : null;
+            const hasStartHead = headStyle === "start" || headStyle === "both";
+            const hasEndHead = headStyle === "end" || headStyle === "both";
+            const headLength = getArrowHeadLength(shape);
+            const parts = [
+                `<line x1="${svgNumber(-half + (hasStartHead ? headLength : 0))}" y1="0"` +
+                ` x2="${svgNumber(half - (hasEndHead ? headLength : 0))}" y2="0" stroke="${color}"` +
+                ` stroke-width="${svgNumber(shape.strokeWidth)}" stroke-linecap="round"` +
+                `${svgDashAttributes(shape, shape.strokeWidth, true)}/>`,
+            ];
+            const head = (direction) => {
+                const tip = half * direction;
+                const base = tip - headLength * direction;
+                return `<polygon points="${svgNumber(tip)},0 ${svgNumber(base)},${svgNumber(headLength / 2)}` +
+                    ` ${svgNumber(base)},${svgNumber(-headLength / 2)}" fill="${color}"/>`;
+            };
+            if (hasStartHead) parts.push(head(-1));
+            if (hasEndHead) parts.push(head(1));
+            return `<g${opacityAttribute}${place(shape.x, shape.y)}>${parts.join("")}</g>`;
+        }
+
+        if (shape.type === "text") {
+            const metrics = measureTextBlock(shape.text, shape.fontSize);
+            const halfWidth = metrics.width / 2;
+            const halfHeight = metrics.height / 2;
+            const baseline = getTextBaselineOffset(shape.fontSize);
+            const background = shape.fillColor
+                ? `<rect x="${svgNumber(-halfWidth)}" y="${svgNumber(-halfHeight)}" width="${svgNumber(metrics.width)}"` +
+                  ` height="${svgNumber(metrics.height)}" fill="${escapeXml(shape.fillColor)}"/>`
+                : "";
+            const lines = metrics.lines.map((line, index) =>
+                `<tspan x="${svgNumber(-halfWidth)}" y="${svgNumber(-halfHeight + index * metrics.lineHeight + baseline)}">` +
+                `${escapeXml(line)}</tspan>`).join("");
+            return `<g${opacityAttribute}${place(shape.x + halfWidth, shape.y + halfHeight)}>${background}` +
+                `<text font-family="sans-serif" font-size="${svgNumber(shape.fontSize)}"` +
+                ` fill="${escapeXml(shape.color || "#000000")}" xml:space="preserve">${lines}</text></g>`;
+        }
+
+        if (shape.type === "image") {
+            // A nested <svg> whose viewBox is the crop window, over the image
+            // stretched to a 1×1 square, shows exactly the cropped part.
+            const crop = getImageCrop(shape);
+            return `<g${opacityAttribute}${place(shape.x, shape.y)}>` +
+                `<svg x="${svgNumber(-shape.width / 2)}" y="${svgNumber(-shape.height / 2)}"` +
+                ` width="${svgNumber(shape.width)}" height="${svgNumber(shape.height)}"` +
+                ` viewBox="${crop.x} ${crop.y} ${crop.width} ${crop.height}" preserveAspectRatio="none">` +
+                `<image width="1" height="1" preserveAspectRatio="none" xlink:href="${escapeXml(shape.src)}"/>` +
+                `</svg></g>`;
+        }
+        return "";
+    }
+
+    function buildSvgDocument({ padding = 0, background = null, shapeList = shapes } = {}) {
+        const extent = getShapesWorldExtent(shapeList);
+        if (!extent) return null;
+        const pad = Number.isFinite(padding) ? Math.max(0, padding) : 0;
+        const x = extent.minX - pad;
+        const y = extent.minY - pad;
+        const width = extent.maxX - extent.minX + pad * 2;
+        const height = extent.maxY - extent.minY + pad * 2;
+        const parts = [
+            `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"` +
+            ` width="${svgNumber(width)}" height="${svgNumber(height)}"` +
+            ` viewBox="${svgNumber(x)} ${svgNumber(y)} ${svgNumber(width)} ${svgNumber(height)}">`,
+        ];
+        if (background) {
+            parts.push(`<rect x="${svgNumber(x)}" y="${svgNumber(y)}" width="${svgNumber(width)}"` +
+                ` height="${svgNumber(height)}" fill="${escapeXml(background)}"/>`);
+        }
+        for (const shape of shapeList) {
+            const markup = shapeToSvg(shape);
+            if (markup) parts.push(markup);
+        }
+        parts.push("</svg>");
+        return `<?xml version="1.0" encoding="UTF-8"?>\n${parts.join("\n")}\n`;
     }
 
     // Remembers the transparency choice across formats that cannot keep it:
@@ -3515,14 +3774,24 @@
         saveImageTransparentInput.checked = spec.transparency && saveImageWantsTransparency;
         saveImageBgColorInput.disabled = saveImageTransparentInput.checked;
 
-        const size = getSaveImageSize(
-            Number(saveImagePaddingInput.value),
-            Number(saveImageScaleSelect.value),
-        );
+        // Resolution means nothing for a vector file.
+        saveImageScaleSelect.disabled = !!spec.vector;
+
+        const padding = Number(saveImagePaddingInput.value);
+        const size = getSaveImageSize(padding, spec.vector ? 1 : Number(saveImageScaleSelect.value));
         saveImageConfirmButton.disabled = !size;
-        saveImageNote.textContent = size
-            ? `Output: ${size.width} × ${size.height} px at ${size.scale}×`
-            : "Nothing drawn yet.";
+        if (!size) {
+            saveImageNote.textContent = "Nothing drawn yet.";
+        } else if (spec.vector) {
+            saveImageNote.textContent = `Output: vector, ${size.width} × ${size.height} px at 100%`;
+        } else if (saveImageFormatSelect.value === "pdf") {
+            const pageWidth = Math.round(size.width / size.scale * 0.75);
+            const pageHeight = Math.round(size.height / size.scale * 0.75);
+            saveImageNote.textContent =
+                `Output: one ${pageWidth} × ${pageHeight} pt page, drawn at ${size.scale}×`;
+        } else {
+            saveImageNote.textContent = `Output: ${size.width} × ${size.height} px at ${size.scale}×`;
+        }
     }
 
     function openSaveImageDialog() {
@@ -3712,10 +3981,8 @@
         jsonFileInput.click();
     });
 
-    jsonFileInput.addEventListener("change", async () => {
-        const file = jsonFileInput.files?.[0];
-        if (!file) return;
-
+    // Open a drawing exported as JSON, from Import JSON or dropped on the canvas.
+    async function importDrawingFile(file) {
         try {
             const imported = normalizeImportedDrawing(JSON.parse(await file.text()));
             if (!await autosaveIfDirty(true)) return;
@@ -3735,6 +4002,14 @@
             render();
         } catch (error) {
             alert(`The drawing could not be imported. ${error.message || "Invalid JSON file."}`);
+        }
+    }
+
+    jsonFileInput.addEventListener("change", async () => {
+        const file = jsonFileInput.files?.[0];
+        if (!file) return;
+        try {
+            await importDrawingFile(file);
         } finally {
             jsonFileInput.value = "";
         }
@@ -6192,19 +6467,25 @@
         }
     });
 
-    function getDraggedImageFile(dataTransfer) {
-        return Array.from(dataTransfer?.files || [])
-            .find(file => file.type.startsWith("image/")) || null;
+    // Drag and drop: an image is added where it lands; a drawing exported as
+    // JSON is opened in place of the current one.
+    function isJsonFile(file) {
+        return file.type === "application/json" || /\.json$/i.test(file.name || "");
     }
 
-    function hasDraggedImage(dataTransfer) {
-        const items = Array.from(dataTransfer?.items || []);
-        return items.some(item => item.kind === "file" && item.type.startsWith("image/")) ||
-            !!getDraggedImageFile(dataTransfer);
+    function getDroppedFile(dataTransfer) {
+        const files = Array.from(dataTransfer?.files || []);
+        return files.find(file => file.type.startsWith("image/")) || files.find(isJsonFile) || null;
+    }
+
+    // While dragging, only the type is known (and it may be blank for .json).
+    function mayBeDroppableFile(dataTransfer) {
+        return Array.from(dataTransfer?.items || []).some(item => item.kind === "file" &&
+            (item.type.startsWith("image/") || item.type === "application/json" || item.type === ""));
     }
 
     canvas.addEventListener("dragover", (e) => {
-        if (!hasDraggedImage(e.dataTransfer)) return;
+        if (!mayBeDroppableFile(e.dataTransfer)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";
         canvas.classList.add("image-drop-target");
@@ -6216,10 +6497,11 @@
 
     canvas.addEventListener("drop", (e) => {
         canvas.classList.remove("image-drop-target");
-        const imageFile = getDraggedImageFile(e.dataTransfer);
-        if (!imageFile) return;
+        const file = getDroppedFile(e.dataTransfer);
+        if (!file) return;
         e.preventDefault();
-        addImageBlob(imageFile, screenToWorld(e.clientX, e.clientY));
+        if (file.type.startsWith("image/")) addImageBlob(file, screenToWorld(e.clientX, e.clientY));
+        else importDrawingFile(file);
     });
 
     // Tooltips are written with Ctrl; show the Command key on a Mac.
