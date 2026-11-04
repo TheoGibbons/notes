@@ -563,6 +563,89 @@
         .zoom-controls #zoom-fit {
             border-left: 1px solid #e3e3e3;
         }
+        /* Right-click menu */
+        .context-menu {
+            position: fixed;
+            z-index: 40;
+            min-width: 220px;
+            padding: 4px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background: #fff;
+            box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+            font-size: 13px;
+        }
+        .context-menu[hidden] {
+            display: none;
+        }
+        .context-menu button {
+            display: flex;
+            justify-content: space-between;
+            gap: 24px;
+            width: 100%;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            padding: 6px 8px;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+        .context-menu button:hover:not(:disabled),
+        .context-menu button:focus-visible {
+            background: #eaf3ff;
+            outline: none;
+        }
+        .context-menu button:disabled {
+            color: #aaa;
+            cursor: default;
+        }
+        .context-menu .shortcut {
+            color: #888;
+        }
+        .context-menu button:disabled .shortcut {
+            color: #ccc;
+        }
+        /* Keyboard shortcuts dialog */
+        .dialog.help-dialog {
+            width: min(820px, calc(100vw - 32px));
+            max-height: calc(100vh - 48px);
+            overflow-y: auto;
+        }
+        .help-columns {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 0 28px;
+            margin-bottom: 12px;
+        }
+        .help-dialog h3 {
+            margin: 10px 0 6px;
+            color: #444;
+            font-size: 13px;
+        }
+        .help-dialog dl {
+            display: grid;
+            grid-template-columns: minmax(0, max-content) minmax(150px, 1fr);
+            gap: 5px 12px;
+            margin: 0;
+            font-size: 13px;
+        }
+        .help-dialog dt kbd {
+            white-space: nowrap;
+        }
+        .help-dialog dd {
+            margin: 0;
+            color: #333;
+        }
+        kbd {
+            display: inline-block;
+            padding: 0 5px;
+            border: 1px solid #ccc;
+            border-bottom-width: 2px;
+            border-radius: 4px;
+            background: #f7f7f7;
+            font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+        }
         /* The eraser's footprint follows the pointer */
         .eraser-cursor {
             position: fixed;
@@ -640,6 +723,7 @@
 
     <div class="spacer"></div>
 
+    <button id="show-help" title="Keyboard shortcuts (?)">Shortcuts</button>
     <button id="update-app" title="A new version is ready — reload to use it">Update</button>
     <button id="install-app" title="Install this app on your device">Install</button>
     <button id="clear" title="Clear everything (Ctrl+N)">Clear</button>
@@ -747,7 +831,20 @@
     <button type="button" id="zoom-fit" title="Zoom to fit everything (Space)">Fit</button>
 </div>
 
+<div class="context-menu" id="context-menu" role="menu" aria-label="Canvas actions" hidden></div>
+
 <div class="eraser-cursor" id="eraser-cursor" hidden></div>
+
+<div class="dialog-backdrop" id="help-backdrop" hidden>
+    <div class="dialog help-dialog" id="help-dialog" role="dialog" aria-modal="true"
+         aria-labelledby="help-title" tabindex="-1">
+        <h2 id="help-title">Keyboard shortcuts</h2>
+        <div class="help-columns" id="help-content"></div>
+        <div class="dialog-actions">
+            <button type="button" id="help-close">Close</button>
+        </div>
+    </div>
+</div>
 
 <div class="dialog-backdrop" id="save-image-backdrop" hidden>
     <form class="dialog" id="save-image-dialog" role="dialog" aria-modal="true"
@@ -903,6 +1000,12 @@
     const zoomResetButton = document.getElementById("zoom-reset");
     const zoomInButton = document.getElementById("zoom-in");
     const zoomFitButton = document.getElementById("zoom-fit");
+    const contextMenu = document.getElementById("context-menu");
+    const showHelpButton = document.getElementById("show-help");
+    const helpBackdrop = document.getElementById("help-backdrop");
+    const helpDialog = document.getElementById("help-dialog");
+    const helpContent = document.getElementById("help-content");
+    const helpCloseButton = document.getElementById("help-close");
 
     const STORAGE_KEY = "drawingPad_saves_v1";
     const SAVE_DB_NAME = "drawingPadDatabase";
@@ -3131,13 +3234,24 @@
         const mod = e.ctrlKey || e.metaKey;
         const key = e.key.toLowerCase();
 
-        // The Save Image dialog owns the keyboard while it is open, so canvas
-        // shortcuts cannot fire behind it (Enter submits the form as usual).
+        // Open dialogs own the keyboard, so canvas shortcuts cannot fire
+        // behind them (Enter submits the Save Image form as usual).
         if (isSaveImageDialogOpen()) {
             if (e.key === "Escape") {
                 e.preventDefault();
                 closeSaveImageDialog();
             }
+            return;
+        }
+        if (isHelpOpen()) {
+            if (e.key === "Escape" || e.key === "?") {
+                e.preventDefault();
+                closeHelp();
+            }
+            return;
+        }
+        if (isContextMenuOpen()) {
+            handleContextMenuKey(e);
             return;
         }
 
@@ -3215,6 +3329,9 @@
             currentTool !== "text" && !targetIsSelect && !mod && !e.altKey && !e.repeat) {
             e.preventDefault();
             zoomToFitShapes();
+        } else if (e.key === "?" && !targetIsEditable && !mod && !e.altKey) {
+            e.preventDefault();
+            openHelp();
         } else if (!targetIsEditable && !mod && !e.altKey && !e.repeat && toolHotkeys[key]) {
             e.preventDefault();
             stopAllInteractions(true);
@@ -3476,6 +3593,40 @@
         } else {
             addImageBlob(blob, target);
         }
+    }
+
+    // The right-click menu's Paste has no paste event to read, so it asks the
+    // async Clipboard API (the browser may ask permission the first time).
+    async function pasteFromMenu(target) {
+        if (shapeClipboard && !shapeClipboard.maybeStale) {
+            pasteShapes(shapeClipboard.shapes, target);
+            return;
+        }
+        try {
+            if (navigator.clipboard?.read) {
+                const items = await navigator.clipboard.read();
+                for (const item of items) {
+                    const imageType = item.types.find(type => type.startsWith("image/"));
+                    if (imageType) {
+                        await pasteClipboardImage(await item.getType(imageType), target);
+                        return;
+                    }
+                    if (item.types.includes("text/plain")) {
+                        const text = await (await item.getType("text/plain")).text();
+                        if (pasteText(text, target)) return;
+                    }
+                }
+            } else if (navigator.clipboard?.readText) {
+                if (pasteText(await navigator.clipboard.readText(), target)) return;
+            }
+        } catch (error) {
+            console.warn("Could not read the clipboard", error);
+        }
+        if (shapeClipboard) {
+            pasteShapes(shapeClipboard.shapes, target);
+            return;
+        }
+        alert(`The clipboard could not be read here. Press ${MOD_KEY_LABEL}+V to paste instead.`);
     }
 
     function saveImage({
@@ -6049,6 +6200,7 @@
 
     // Mouse handling
     canvas.addEventListener("mousedown", (e) => {
+        closeContextMenu();
         // On a Mac, Ctrl+click is a right-click: leave it to the context menu.
         if (IS_MAC && e.ctrlKey && e.button === 0) return;
         commitCurrentTextEditor();
@@ -6140,6 +6292,7 @@
         camera.scale = clamped;
         camera.x = worldX - screenX / clamped;
         camera.y = worldY - screenY / clamped;
+        closeContextMenu();
         render();
         repositionTextEditor();
     }
@@ -6179,6 +6332,7 @@
 
     canvas.addEventListener("wheel", (e) => {
         e.preventDefault();
+        closeContextMenu();
 
         const now = performance.now();
         const continuing = now - lastWheelGesture.time < 150;
@@ -6502,6 +6656,257 @@
         e.preventDefault();
         if (file.type.startsWith("image/")) addImageBlob(file, screenToWorld(e.clientX, e.clientY));
         else importDrawingFile(file);
+    });
+
+    // --- Right-click menu ----------------------------------------------------
+    let contextMenuWorld = null; // where the menu was opened, for Paste
+
+    function isContextMenuOpen() {
+        return !contextMenu.hidden;
+    }
+
+    function closeContextMenu() {
+        if (contextMenu.hidden) return;
+        contextMenu.hidden = true;
+        contextMenu.textContent = "";
+    }
+
+    function getContextMenuItems() {
+        const hasSelection = selectedShapes.length > 0;
+        const canPaste = !!shapeClipboard || !!navigator.clipboard?.read || !!navigator.clipboard?.readText;
+        const mod = MOD_KEY_LABEL;
+        return [
+            { label: "Cut", shortcut: `${mod}+X`, enabled: hasSelection, run: cutSelection },
+            { label: "Copy", shortcut: `${mod}+C`, enabled: hasSelection, run: copySelection },
+            { label: "Paste", shortcut: `${mod}+V`, enabled: canPaste, run: () => pasteFromMenu(contextMenuWorld) },
+            { label: "Duplicate", shortcut: `${mod}+D`, enabled: hasSelection, run: duplicateSelectedShapes },
+            { label: "Delete", shortcut: IS_MAC ? "⌫" : "Del", enabled: hasSelection, run: deleteSelectedShapes },
+            null,
+            {
+                label: "Bring to Front", enabled: hasSelection && !bringToFrontButton.disabled,
+                run: () => moveSelectionToStackEnd(true),
+            },
+            {
+                label: "Send to Back", enabled: hasSelection && !sendToBackButton.disabled,
+                run: () => moveSelectionToStackEnd(false),
+            },
+            null,
+            { label: "Select All", shortcut: `${mod}+A`, enabled: shapes.length > 0, run: selectAllShapes },
+            { label: "Zoom to Fit", shortcut: "Space", enabled: shapes.length > 0, run: zoomToFitShapes },
+            { label: "Keyboard Shortcuts", shortcut: "?", enabled: true, run: openHelp },
+        ];
+    }
+
+    function openContextMenu(clientX, clientY) {
+        contextMenu.textContent = "";
+        for (const item of getContextMenuItems()) {
+            if (!item) {
+                const separator = document.createElement("div");
+                separator.className = "menu-separator";
+                separator.setAttribute("role", "separator");
+                contextMenu.appendChild(separator);
+                continue;
+            }
+            const button = document.createElement("button");
+            button.type = "button";
+            button.setAttribute("role", "menuitem");
+            button.disabled = !item.enabled;
+            const label = document.createElement("span");
+            label.textContent = item.label;
+            button.appendChild(label);
+            if (item.shortcut) {
+                const shortcut = document.createElement("span");
+                shortcut.className = "shortcut";
+                shortcut.textContent = item.shortcut;
+                button.appendChild(shortcut);
+            }
+            button.addEventListener("click", () => {
+                closeContextMenu();
+                item.run();
+            });
+            contextMenu.appendChild(button);
+        }
+
+        contextMenu.hidden = false;
+        // Open at the pointer, but keep the whole menu on screen.
+        const { width, height } = contextMenu.getBoundingClientRect();
+        contextMenu.style.left = `${Math.max(4, Math.min(clientX, window.innerWidth - width - 4))}px`;
+        contextMenu.style.top = `${Math.max(4, Math.min(clientY, window.innerHeight - height - 4))}px`;
+        contextMenu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+    }
+
+    function handleContextMenuKey(e) {
+        const items = Array.from(contextMenu.querySelectorAll("button:not(:disabled)"));
+        const index = items.indexOf(document.activeElement);
+        if (e.key === "Escape" || e.key === "Tab") {
+            e.preventDefault();
+            closeContextMenu();
+        } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            items[(index + 1) % items.length]?.focus();
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            items[index <= 0 ? items.length - 1 : index - 1]?.focus();
+        } else if (e.key === "Home" || e.key === "End") {
+            e.preventDefault();
+            items[e.key === "Home" ? 0 : items.length - 1]?.focus();
+        }
+        // Enter and Space activate the focused item as ordinary button presses.
+    }
+
+    canvas.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        if (cropSession || hasActiveMouseInteraction()) return;
+        commitCurrentTextEditor();
+        const world = screenToWorld(e.clientX, e.clientY);
+        contextMenuWorld = world;
+        lastPointerClient = { x: e.clientX, y: e.clientY };
+
+        // Right-clicking an item acts on it; inside the current selection's
+        // box acts on the selection; anywhere else starts with nothing selected.
+        const hit = hitTestShapes(world.x, world.y);
+        if (hit) {
+            if (!isShapeSelected(hit)) setSelection([hit]);
+        } else {
+            const extent = getShapesWorldExtent(selectedShapes);
+            const insideSelection = extent && world.x >= extent.minX && world.x <= extent.maxX &&
+                world.y >= extent.minY && world.y <= extent.maxY;
+            if (!insideSelection) clearSelection();
+        }
+        updateControlVisibility();
+        render();
+        openContextMenu(e.clientX, e.clientY);
+    });
+
+    document.addEventListener("pointerdown", (e) => {
+        if (isContextMenuOpen() && !contextMenu.contains(e.target)) closeContextMenu();
+    });
+    window.addEventListener("blur", closeContextMenu);
+    window.addEventListener("resize", closeContextMenu);
+
+    // --- Keyboard shortcuts dialog --------------------------------------------
+    function getShortcutGroups() {
+        const mod = MOD_KEY_LABEL;
+        return [
+            {
+                title: "Tools",
+                rows: [
+                    ["P", "Pen"], ["T", "Text"], ["R", "Rectangle"], ["C", "Circle"],
+                    ["A", "Arrow"], ["L", "Line"], ["I", "Insert an image"], ["E", "Eraser"],
+                    ["V", "Select / Move"], ["H", "Hand / Pan"],
+                ],
+            },
+            {
+                title: "Editing",
+                rows: [
+                    [`${mod}+Z`, "Undo"],
+                    [`${mod}+Shift+Z / ${mod}+Y`, "Redo"],
+                    [`${mod}+C`, "Copy (other apps get a picture)"],
+                    [`${mod}+X`, "Cut"],
+                    [`${mod}+V`, "Paste shapes, an image or text"],
+                    [`${mod}+D`, "Duplicate"],
+                    [IS_MAC ? "⌫" : "Delete / Backspace", "Delete the selection"],
+                    [`${mod}+A`, "Select everything"],
+                    ["←↑→↓", "Nudge (with Shift: 10 px)"],
+                    ["Esc", "Deselect, then switch to Select"],
+                    [`${mod}+Enter`, "Finish editing text"],
+                ],
+            },
+            {
+                title: "Mouse and trackpad",
+                rows: [
+                    [`${mod}+click`, "Add to or remove from the selection"],
+                    ["Shift+drag", "Square, circle, or a 15° line or arrow"],
+                    ["Shift+rotate", "Rotate in 15° steps"],
+                    ["Shift+resize", "Keep proportions"],
+                    ["Right-click", "Actions for the item under the pointer", true],
+                    ["Double-click", "Edit text or crop an image", true],
+                ],
+            },
+            {
+                title: "View",
+                rows: [
+                    ["Space", "Zoom to fit everything"],
+                    [`${mod}+= / ${mod}+−`, "Zoom in / out"],
+                    [`${mod}+0`, "Zoom to 100%"],
+                    ["Mouse wheel", "Zoom", true],
+                    ["Two-finger scroll", "Pan (trackpad)", true],
+                    ["Pinch", "Zoom (trackpad)", true],
+                    ["Middle-drag", "Pan", true],
+                ],
+            },
+            {
+                title: "File",
+                rows: [
+                    [`${mod}+S`, "Save as a PNG image"],
+                    [`${mod}+N`, "Clear for a new drawing"],
+                    ["?", "Show this list"],
+                ],
+            },
+        ];
+    }
+
+    // "Ctrl+Shift+Z / Ctrl+Y" → <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or …
+    function renderShortcutKeys(container, text, isGesture) {
+        if (isGesture) {
+            container.textContent = text;
+            return;
+        }
+        text.split(" / ").forEach((combo, comboIndex) => {
+            if (comboIndex > 0) container.append(" or ");
+            combo.split("+").forEach((key, keyIndex) => {
+                if (keyIndex > 0) container.append("+");
+                // Mouse actions ("click", "drag") are words, not keys.
+                if (/^[a-z]{2,}$/.test(key)) {
+                    container.append(key);
+                    return;
+                }
+                const kbd = document.createElement("kbd");
+                kbd.textContent = key;
+                container.appendChild(kbd);
+            });
+        });
+    }
+
+    function renderHelp() {
+        helpContent.textContent = "";
+        for (const group of getShortcutGroups()) {
+            const section = document.createElement("section");
+            const heading = document.createElement("h3");
+            heading.textContent = group.title;
+            const list = document.createElement("dl");
+            for (const [keys, description, isGesture] of group.rows) {
+                const term = document.createElement("dt");
+                renderShortcutKeys(term, keys, isGesture);
+                const detail = document.createElement("dd");
+                detail.textContent = description;
+                list.append(term, detail);
+            }
+            section.append(heading, list);
+            helpContent.appendChild(section);
+        }
+    }
+
+    function isHelpOpen() {
+        return !helpBackdrop.hidden;
+    }
+
+    function openHelp() {
+        closeContextMenu();
+        closeSaveMenu();
+        if (!helpContent.childElementCount) renderHelp();
+        helpBackdrop.hidden = false;
+        helpCloseButton.focus({ preventScroll: true });
+    }
+
+    function closeHelp() {
+        helpBackdrop.hidden = true;
+    }
+
+    showHelpButton.addEventListener("click", openHelp);
+    helpCloseButton.addEventListener("click", closeHelp);
+    helpBackdrop.addEventListener("mousedown", (e) => {
+        if (e.target === helpBackdrop) closeHelp();
     });
 
     // Tooltips are written with Ctrl; show the Command key on a Mac.
