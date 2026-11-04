@@ -1086,6 +1086,12 @@
     let resizeChanged = false;
     let rotateChanged = false;
 
+    // Resizing or rotating a multi-selection as one group:
+    // { mode: 'resize'|'rotate', handle, extent, anchor, corner, pivot,
+    //   startAngle, angle, originals: [{ shape, geometry }], changed }
+    let groupTransform = null;
+    const GROUP_BOX_PAD_SCREEN = 6;
+    let resizeStartPoints = null;  // a pen stroke's points when its resize began
     let lastPointerClient = null;  // last known mouse position, in client px
     const ANGLE_SNAP = Math.PI / 12; // Shift snaps angles to 15° steps
 
@@ -1272,8 +1278,8 @@
         if (cropSession) {
             drawCropOverlay();
         } else if (selectedShapes.length) {
-            // Transform handles belong to a single shape, so a multi-selection
-            // gets plain outlines plus one box around the whole group.
+            // A single shape carries its own handles; a multi-selection gets
+            // plain outlines plus one box (with handles) around the group.
             const isSingleSelection = selectedShapes.length === 1 && !isMarqueeSelecting;
             const isEditingSelectedText = !!currentTextEditor &&
                 currentTextEditor.shape === selectedShape;
@@ -1528,19 +1534,49 @@
     }
 
     function drawMultiSelectionBounds(scale) {
-        const extent = getShapesWorldExtent(selectedShapes);
+        // While a group is being rotated, draw the box it started from turned
+        // with it, rather than the shifting axis-aligned box around the shapes.
+        const rotating = groupTransform?.mode === "rotate" ? groupTransform : null;
+        const extent = rotating ? rotating.extent : getShapesWorldExtent(selectedShapes);
         if (!extent) return;
-        const pad = 6;
+        const pad = GROUP_BOX_PAD_SCREEN;
+        const handleMetrics = getTransformHandleMetrics();
+        const halfW = (extent.maxX - extent.minX) / 2 * scale + pad;
+        const halfH = (extent.maxY - extent.minY) / 2 * scale + pad;
+
         ctx.save();
+        ctx.translate(
+            ((extent.minX + extent.maxX) / 2 - camera.x) * scale,
+            ((extent.minY + extent.maxY) / 2 - camera.y) * scale,
+        );
+        if (rotating) ctx.rotate(rotating.angle);
         ctx.setLineDash([2, 4]);
         ctx.lineWidth = 1;
         ctx.strokeStyle = "#007bff";
-        ctx.strokeRect(
-            (extent.minX - camera.x) * scale - pad,
-            (extent.minY - camera.y) * scale - pad,
-            (extent.maxX - extent.minX) * scale + pad * 2,
-            (extent.maxY - extent.minY) * scale + pad * 2,
-        );
+        ctx.strokeRect(-halfW, -halfH, halfW * 2, halfH * 2);
+
+        if (canShowGroupHandles()) {
+            ctx.setLineDash([]);
+            if (!rotating) {
+                const size = handleMetrics.resizeSize;
+                ctx.fillStyle = "#ffffff";
+                for (const [x, y] of [[-halfW, -halfH], [halfW, -halfH], [halfW, halfH], [-halfW, halfH]]) {
+                    ctx.beginPath();
+                    ctx.rect(x - size / 2, y - size / 2, size, size);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            }
+            const rotY = -halfH - handleMetrics.rotationOffset;
+            ctx.beginPath();
+            ctx.moveTo(0, -halfH);
+            ctx.lineTo(0, rotY + handleMetrics.visibleRadius);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(0, rotY, handleMetrics.visibleRadius, 0, Math.PI * 2);
+            ctx.fillStyle = "#007bff";
+            ctx.fill();
+        }
         ctx.restore();
     }
 
@@ -1801,7 +1837,7 @@
             }
             const w = bounds.width * scale;
             const h = bounds.height * scale;
-            const pad = Math.max(4, (shape.width || 0) * scale / 2);
+            const pad = getStrokeHandlePad(shape) * scale;
             ctx.save();
             ctx.translate(
                 (bounds.x - camera.x) * scale,
@@ -1810,8 +1846,18 @@
             ctx.rotate(shape.rotation || 0);
             ctx.strokeRect(-w / 2 - pad, -h / 2 - pad, w + pad * 2, h + pad * 2);
             if (withHandles) {
-                const rotY = -h / 2 - handleMetrics.rotationOffset;
+                // Corner handles sit on the padded box, so a perfectly straight
+                // stroke still has handles a little apart to grab.
+                const hs = handleMetrics.resizeSize;
                 ctx.setLineDash([]);
+                ctx.fillStyle = "#ffffff";
+                for (const [x, y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+                    ctx.beginPath();
+                    ctx.rect(x * (w / 2 + pad) - hs / 2, y * (h / 2 + pad) - hs / 2, hs, hs);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+                const rotY = -h / 2 - handleMetrics.rotationOffset;
                 ctx.beginPath();
                 ctx.moveTo(0, -h / 2);
                 ctx.lineTo(0, rotY + handleMetrics.visibleRadius);
@@ -4118,11 +4164,13 @@
             return null;
         }
 
-        const halfW = bounds.width / 2;
-        const halfH = bounds.height / 2;
+        // Pen strokes draw their corner handles on a slightly padded box.
+        const strokePad = shape.type === "stroke" ? getStrokeHandlePad(shape) : 0;
+        const halfW = bounds.width / 2 + strokePad;
+        const halfH = bounds.height / 2 + strokePad;
 
-        // Text and pen size have settings controls, so those shapes get rotation
-        // without corner-resize handles. Box-like shapes retain all four corners.
+        // Text size has its own setting, so text gets rotation without corner
+        // handles. Everything else box-like has all four corners.
         const handleLocals = [
             { id: "tl", lx: -halfW, ly: -halfH },
             { id: "tr", lx: halfW,  ly: -halfH },
@@ -4141,7 +4189,7 @@
             };
         }
 
-        if (shape.type !== "text" && shape.type !== "stroke") {
+        if (shape.type !== "text") {
             for (const h of handleLocals) {
                 const p = localToWorld(h.lx, h.ly);
                 const dx = worldX - p.x;
@@ -4164,6 +4212,11 @@
         }
 
         return null;
+    }
+
+    // Gap, in world units, between a pen stroke and its selection box.
+    function getStrokeHandlePad(shape) {
+        return Math.max(4 / (camera.scale || 1), (shape.width || 0) / 2);
     }
 
     function getShapeBounds(shape) {
@@ -4425,14 +4478,17 @@
         activeHandle = handleInfo.id;
         resizeChanged = false;
         const b = getShapeBounds(shape);
+        // A pen stroke has no x/y of its own: it pivots on its points' centre.
+        const isStroke = shape.type === "stroke";
         originalBounds = {
-            x: shape.x,
-            y: shape.y,
+            x: isStroke ? b.x : shape.x,
+            y: isStroke ? b.y : shape.y,
             width: b ? b.width : 0,
             height: b ? b.height : 0,
             radius: shape.radius || 0,
             rotation: shape.rotation || 0,
         };
+        resizeStartPoints = isStroke ? shape.points.map(p => ({ x: p.x, y: p.y })) : null;
         dragStartWorld = { ...world };
     }
 
@@ -4496,6 +4552,185 @@
         const dy = world.y - rotationCenter.y;
         rotationStartAngle = Math.atan2(dy, dx);
         shapeStartRotation = shape.rotation || 0;
+    }
+
+    // --- Group resize and rotate -------------------------------------------
+    // A multi-selection gets one box with corner and rotation handles. Corners
+    // scale the whole group evenly from the opposite corner (an uneven scale
+    // can't be applied to rotated shapes); rotation turns it about its centre.
+
+    function canShowGroupHandles() {
+        return currentTool === "select" && selectedShapes.length > 1 &&
+            !isMarqueeSelecting && !cropSession && !currentTextEditor;
+    }
+
+    function getGroupHandleAtWorld(world, preferCoarse = false) {
+        if (!canShowGroupHandles()) return null;
+        const extent = getShapesWorldExtent(selectedShapes);
+        if (!extent) return null;
+        const scale = camera.scale || 1;
+        const metrics = getTransformHandleMetrics(preferCoarse);
+        const pad = GROUP_BOX_PAD_SCREEN / scale;
+        const left = extent.minX - pad;
+        const right = extent.maxX + pad;
+        const top = extent.minY - pad;
+        const bottom = extent.maxY + pad;
+
+        const rotation = { x: (left + right) / 2, y: top - metrics.rotationOffset / scale };
+        const rotationRadius = metrics.rotationHitRadius / scale;
+        if (Math.hypot(world.x - rotation.x, world.y - rotation.y) <= rotationRadius) {
+            return { mode: "rotate", extent };
+        }
+        const resizeRadius = metrics.resizeHitRadius / scale;
+        const corners = { tl: [left, top], tr: [right, top], br: [right, bottom], bl: [left, bottom] };
+        for (const [id, [x, y]] of Object.entries(corners)) {
+            if (Math.hypot(world.x - x, world.y - y) <= resizeRadius) {
+                return { mode: "resize", handle: id, extent };
+            }
+        }
+        return null;
+    }
+
+    // Just the geometry a group transform rewrites, so images' (potentially
+    // huge) data URLs aren't copied every time a group is grabbed.
+    function captureShapeGeometry(shape) {
+        if (shape.type === "stroke") {
+            const bounds = getShapeBounds(shape);
+            return {
+                points: shape.points.map(p => ({ x: p.x, y: p.y })),
+                center: bounds ? { x: bounds.x, y: bounds.y } : { x: 0, y: 0 },
+                rotation: shape.rotation || 0,
+            };
+        }
+        if (shape.type === "text") {
+            const metrics = measureTextBlock(shape.text, shape.fontSize || 0);
+            return {
+                x: shape.x, y: shape.y, fontSize: shape.fontSize,
+                width: metrics.width, height: metrics.height, rotation: shape.rotation || 0,
+            };
+        }
+        return {
+            x: shape.x, y: shape.y, rotation: shape.rotation || 0,
+            width: shape.width, height: shape.height, rx: shape.rx, ry: shape.ry,
+            length: shape.length, cornerRadius: shape.cornerRadius,
+        };
+    }
+
+    function beginGroupTransform(hit, world) {
+        const { extent } = hit;
+        const center = { x: (extent.minX + extent.maxX) / 2, y: (extent.minY + extent.maxY) / 2 };
+        groupTransform = {
+            mode: hit.mode,
+            handle: hit.handle || null,
+            extent: { ...extent },
+            pivot: center,
+            startWorld: { ...world },
+            startAngle: Math.atan2(world.y - center.y, world.x - center.x),
+            angle: 0,
+            originals: selectedShapes.map(shape => ({ shape, geometry: captureShapeGeometry(shape) })),
+            changed: false,
+        };
+        if (hit.mode === "resize") {
+            const id = hit.handle;
+            groupTransform.corner = {
+                x: id.includes("r") ? extent.maxX : extent.minX,
+                y: id.includes("b") ? extent.maxY : extent.minY,
+            };
+            groupTransform.anchor = {
+                x: id.includes("r") ? extent.minX : extent.maxX,
+                y: id.includes("b") ? extent.minY : extent.maxY,
+            };
+        }
+    }
+
+    function scaleShapeFrom(shape, geometry, anchor, factor) {
+        const map = (x, y) => ({ x: anchor.x + (x - anchor.x) * factor, y: anchor.y + (y - anchor.y) * factor });
+        if (shape.type === "stroke") {
+            geometry.points.forEach((p, i) => {
+                const q = map(p.x, p.y);
+                shape.points[i].x = q.x;
+                shape.points[i].y = q.y;
+            });
+            return;
+        }
+        if (shape.type === "text") {
+            const center = map(geometry.x + geometry.width / 2, geometry.y + geometry.height / 2);
+            shape.fontSize = Math.max(0.01, Math.round(geometry.fontSize * factor * 100) / 100);
+            const metrics = measureTextBlock(shape.text, shape.fontSize);
+            shape.x = center.x - metrics.width / 2;
+            shape.y = center.y - metrics.height / 2;
+            return;
+        }
+        const center = map(geometry.x, geometry.y);
+        shape.x = center.x;
+        shape.y = center.y;
+        if (shape.type === "rect" || shape.type === "image") {
+            shape.width = geometry.width * factor;
+            shape.height = geometry.height * factor;
+            if (geometry.cornerRadius) shape.cornerRadius = geometry.cornerRadius * factor;
+        } else if (shape.type === "circle") {
+            shape.rx = geometry.rx * factor;
+            shape.ry = geometry.ry * factor;
+        } else if (isSegmentShape(shape)) {
+            shape.length = geometry.length * factor;
+        }
+    }
+
+    function rotateShapeAbout(shape, geometry, pivot, angle) {
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const turn = (x, y) => ({
+            x: pivot.x + (x - pivot.x) * cos - (y - pivot.y) * sin,
+            y: pivot.y + (x - pivot.x) * sin + (y - pivot.y) * cos,
+        });
+        shape.rotation = geometry.rotation + angle;
+        if (shape.type === "stroke") {
+            // Strokes turn about their own centre, so move that centre round
+            // the pivot and shift every point with it.
+            const moved = turn(geometry.center.x, geometry.center.y);
+            const dx = moved.x - geometry.center.x;
+            const dy = moved.y - geometry.center.y;
+            geometry.points.forEach((p, i) => {
+                shape.points[i].x = p.x + dx;
+                shape.points[i].y = p.y + dy;
+            });
+        } else if (shape.type === "text") {
+            const moved = turn(geometry.x + geometry.width / 2, geometry.y + geometry.height / 2);
+            shape.x = moved.x - geometry.width / 2;
+            shape.y = moved.y - geometry.height / 2;
+        } else {
+            const moved = turn(geometry.x, geometry.y);
+            shape.x = moved.x;
+            shape.y = moved.y;
+        }
+    }
+
+    function updateGroupTransform(world, shiftKey) {
+        const transform = groupTransform;
+        if (transform.mode === "rotate") {
+            let angle = Math.atan2(world.y - transform.pivot.y, world.x - transform.pivot.x) -
+                transform.startAngle;
+            if (shiftKey) angle = snapAngle(angle);
+            transform.angle = angle;
+            for (const { shape, geometry } of transform.originals) {
+                rotateShapeAbout(shape, geometry, transform.pivot, angle);
+            }
+        } else {
+            const { anchor, corner } = transform;
+            const diagonalX = corner.x - anchor.x;
+            const diagonalY = corner.y - anchor.y;
+            const diagonalSquared = diagonalX * diagonalX + diagonalY * diagonalY;
+            if (diagonalSquared <= 0) return;
+            const draggedX = corner.x + world.x - transform.startWorld.x - anchor.x;
+            const draggedY = corner.y + world.y - transform.startWorld.y - anchor.y;
+            const minFactor = (10 / (camera.scale || 1)) / Math.sqrt(diagonalSquared);
+            const factor = Math.max(minFactor, (draggedX * diagonalX + draggedY * diagonalY) / diagonalSquared);
+            for (const { shape, geometry } of transform.originals) {
+                scaleShapeFrom(shape, geometry, anchor, factor);
+            }
+        }
+        transform.changed = true;
+        render();
     }
 
     function isShapeDrawingTool(tool) {
@@ -4646,6 +4881,13 @@
             return;
         }
 
+        // A multi-selection's own box handles come before anything under them.
+        const groupHandle = getGroupHandleAtWorld(world, preferCoarseHandles);
+        if (groupHandle) {
+            beginGroupTransform(groupHandle, world);
+            return;
+        }
+
         // Completed items keep their drawing tool active, so handle hit-testing
         // must also work in that tool instead of being limited to Select/Move.
         if (selectedShape && isTransformableShape(selectedShape) &&
@@ -4748,6 +4990,11 @@
             return;
         }
 
+        if (groupTransform && !isPanning) {
+            updateGroupTransform(world, shiftKey);
+            return;
+        }
+
         if (currentTool === "pen" && isDrawing && currentStroke) {
             // Skip moves under half a screen pixel: they only add jitter.
             const last = currentStroke.points[currentStroke.points.length - 1];
@@ -4811,6 +5058,10 @@
                     newW = b.width * uniformScale;
                     newH = b.height * uniformScale;
                 }
+                // A perfectly straight pen stroke has no extent across itself;
+                // that side stays at zero rather than growing to the minimum.
+                if (b.width < 1e-6) newW = b.width;
+                if (b.height < 1e-6) newH = b.height;
 
                 // Move the center by half the size change, leaving the corner
                 // opposite the dragged handle fixed in world space.
@@ -4819,6 +5070,20 @@
                     fixedX + signX * newW / 2,
                     fixedY + signY * newH / 2
                 );
+
+                if (selectedShape.type === "stroke" && resizeStartPoints) {
+                    // Stroke points are stored unrotated around their centre,
+                    // so scaling their offsets scales along the stroke's axes.
+                    const scaleX = b.width > 1e-6 ? newW / b.width : 1;
+                    const scaleY = b.height > 1e-6 ? newH / b.height : 1;
+                    resizeStartPoints.forEach((p, i) => {
+                        selectedShape.points[i].x = newCenter.x + (p.x - b.x) * scaleX;
+                        selectedShape.points[i].y = newCenter.y + (p.y - b.y) * scaleY;
+                    });
+                    resizeChanged = true;
+                    render();
+                    return;
+                }
                 selectedShape.x = newCenter.x;
                 selectedShape.y = newCenter.y;
 
@@ -4949,8 +5214,33 @@
         if (isRotating && rotateChanged) {
             pushHistory();
         }
+        if (groupTransform) {
+            const { changed, originals } = groupTransform;
+            groupTransform = null;
+            if (changed && cancelDrawing) {
+                // Escape mid-drag puts the group back where it started.
+                for (const { shape, geometry } of originals) {
+                    if (shape.type === "stroke") {
+                        geometry.points.forEach((p, i) => {
+                            shape.points[i].x = p.x;
+                            shape.points[i].y = p.y;
+                        });
+                        shape.rotation = geometry.rotation;
+                    } else {
+                        const { points, center, ...fields } = geometry;
+                        for (const [key, value] of Object.entries(fields)) {
+                            if (value !== undefined && key in shape) shape[key] = value;
+                        }
+                    }
+                }
+            } else if (changed) {
+                pushHistory();
+            }
+            render();
+        }
 
         isDrawing = false;
+        resizeStartPoints = null;
         isPanning = false;
         isDraggingSelection = false;
         collapseSelectionTo = null;
@@ -4997,7 +5287,7 @@
 
     function hasActiveMouseInteraction() {
         return isDrawing || isPanning || isDraggingSelection || isResizing ||
-            isRotating || isMarqueeSelecting || Boolean(cropDragHandle);
+            isRotating || isMarqueeSelecting || Boolean(cropDragHandle) || Boolean(groupTransform);
     }
 
     // Tracked on the window so a drag keeps following the mouse when it leaves
@@ -5026,7 +5316,7 @@
     // without waiting for the mouse to move.
     function refreshConstrainedDrag(shiftKey) {
         if (!lastPointerClient) return;
-        const constrainable = (isDrawing && draftShape) || isResizing || isRotating;
+        const constrainable = (isDrawing && draftShape) || isResizing || isRotating || groupTransform;
         if (!constrainable) return;
         const { x, y } = lastPointerClient;
         handlePointerMove(screenToWorld(x, y), x, y, shiftKey);
