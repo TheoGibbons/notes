@@ -607,7 +607,7 @@
     <div class="divider"></div>
 
     <button data-tool="eraser" title="Eraser (E)">Eraser</button>
-    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C to copy as an image, Ctrl+D to duplicate, arrow keys to nudge">Select / Move</button>
+    <button data-tool="select" title="Select / Move (V) — Ctrl+click to add, Ctrl+A to select all, Ctrl+C / Ctrl+X / Ctrl+V to copy, cut and paste, Ctrl+D to duplicate, arrow keys to nudge">Select / Move</button>
     <button data-tool="hand" title="Hand / Pan (H)">Hand / Pan</button>
 
     <div class="divider"></div>
@@ -3172,7 +3172,11 @@
         } else if (mod && !e.shiftKey && !e.altKey && key === "c" && !targetIsEditable &&
             selectedShapes.length) {
             e.preventDefault();
-            copySelectedShapesToClipboard();
+            copySelection();
+        } else if (mod && !e.shiftKey && !e.altKey && key === "x" && !targetIsEditable &&
+            selectedShapes.length) {
+            e.preventDefault();
+            cutSelection();
         } else if (mod && !e.shiftKey && !e.altKey && key === "d" && !targetIsEditable) {
             // Always swallow the key, selection or not, so the browser's
             // bookmark dialog never opens over the canvas.
@@ -3331,34 +3335,139 @@
         return new Blob([bytes], { type: mimeMatch?.[1] || "image/png" });
     }
 
-    function copySelectedShapesToClipboard() {
+    // --- Copy, cut and paste ------------------------------------------------
+    // Copying puts a PNG of the selection on the system clipboard, for pasting
+    // into other apps, and keeps the shapes themselves here so pasting back
+    // into the drawing gives editable shapes rather than a picture of them.
+    //
+    // The system clipboard can't carry the shapes alongside the PNG without
+    // other apps pasting the wrong one, so a paste decides which to use: our
+    // shapes if nothing else can have been copied since (the page never lost
+    // focus), or if the clipboard still holds an image the size of our PNG.
+    let shapeClipboard = null; // { shapes, imageSize, maybeStale }
+
+    // Copying anything else — in another app (the window loses focus) or from
+    // a text field on this page — means the clipboard may not be ours any more.
+    function markShapeClipboardStale() {
+        if (shapeClipboard) shapeClipboard.maybeStale = true;
+    }
+    window.addEventListener("blur", markShapeClipboardStale);
+    document.addEventListener("copy", markShapeClipboardStale);
+    document.addEventListener("cut", markShapeClipboardStale);
+
+    function writeShapesImageToClipboard(shapeList) {
+        if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") return;
+        try {
+            const dataUrl = renderDrawingToDataUrl({ format: "png", shapeList });
+            if (!dataUrl) return;
+            navigator.clipboard.write([
+                new ClipboardItem({ "image/png": dataUrlToBlob(dataUrl) }),
+            ]).catch(error => {
+                console.error("Could not copy the selection to the clipboard as an image", error);
+            });
+        } catch (error) {
+            console.error("Could not copy the selection to the clipboard as an image", error);
+        }
+    }
+
+    function copySelection() {
         commitCurrentTextEditor();
         // A pending crop is part of what the user sees and expects to copy.
         applyImageCrop();
 
         const shapeList = shapes.filter(isShapeSelected);
         if (!shapeList.length) return false;
+        const imageSize = getSaveImageSize(0, DEFAULT_IMAGE_EXPORT_SCALE, shapeList);
+        shapeClipboard = {
+            shapes: cloneShapes(shapeList),
+            imageSize: imageSize ? { width: imageSize.width, height: imageSize.height } : null,
+            maybeStale: false,
+        };
+        writeShapesImageToClipboard(shapeList);
+        return true;
+    }
 
-        if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
-            alert("This browser does not support copying images to the clipboard.");
+    function cutSelection() {
+        if (copySelection()) deleteSelectedShapes();
+    }
+
+    // Where pasted things land: under the mouse when it is over the canvas,
+    // otherwise the middle of the view.
+    function getPasteTarget() {
+        const rect = getCanvasRect();
+        const pointer = lastPointerClient;
+        if (pointer && pointerOverCanvas &&
+            pointer.x >= rect.left && pointer.x <= rect.right &&
+            pointer.y >= rect.top && pointer.y <= rect.bottom) {
+            return screenToWorld(pointer.x, pointer.y);
+        }
+        return screenToWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    }
+
+    function pasteShapes(list, target = getPasteTarget()) {
+        commitCurrentTextEditor();
+        applyImageCrop();
+        const copies = cloneShapes(list);
+        const extent = getShapesWorldExtent(copies);
+        if (!extent) return;
+        const dx = target.x - (extent.minX + extent.maxX) / 2;
+        const dy = target.y - (extent.minY + extent.maxY) / 2;
+        for (const copy of copies) translateShape(copy, dx, dy);
+
+        shapes.push(...copies);
+        setSelection(copies);
+        switchToSelectTool();
+        pushHistory();
+        updateControlVisibility();
+        render();
+    }
+
+    function pasteText(text, target = getPasteTarget()) {
+        const content = String(text).replace(/\r\n?/g, "\n").replace(/\t/g, "    ").replace(/\s+$/, "");
+        if (!content.trim()) return false;
+        commitCurrentTextEditor();
+        applyImageCrop();
+        const metrics = measureTextBlock(content, textSize);
+        const shape = {
+            type: "text",
+            x: target.x - metrics.width / 2,
+            y: target.y - metrics.height / 2,
+            text: content,
+            fontSize: textSize,
+            color: penColor,
+            fillColor: null,
+            rotation: 0,
+            opacity: shapeOpacity,
+        };
+        shapes.push(shape);
+        setSelection([shape]);
+        switchToSelectTool();
+        pushHistory();
+        updateControlVisibility();
+        render();
+        return true;
+    }
+
+    async function imageMatchesSize(blob, size) {
+        if (!size || typeof createImageBitmap !== "function") return false;
+        try {
+            const bitmap = await createImageBitmap(blob);
+            const matches = bitmap.width === size.width && bitmap.height === size.height;
+            bitmap.close?.();
+            return matches;
+        } catch {
             return false;
         }
+    }
 
-        try {
-            const dataUrl = renderDrawingToDataUrl({ format: "png", shapeList });
-            if (!dataUrl) return false;
-            const blob = dataUrlToBlob(dataUrl);
-            navigator.clipboard.write([
-                new ClipboardItem({ "image/png": blob }),
-            ]).catch(error => {
-                console.error("Could not copy the selection to the clipboard", error);
-                alert("The selection could not be copied to the clipboard.");
-            });
-            return true;
-        } catch (error) {
-            console.error("Could not copy the selection to the clipboard", error);
-            alert("The selection could not be copied to the clipboard.");
-            return false;
+    // Paste an image from the clipboard: our own copied shapes if it is the
+    // PNG we put there, otherwise the image itself.
+    async function pasteClipboardImage(blob, target) {
+        const clip = shapeClipboard;
+        if (clip && await imageMatchesSize(blob, clip.imageSize)) {
+            pasteShapes(clip.shapes, target);
+        } else {
+            addImageBlob(blob, target);
         }
     }
 
@@ -6062,10 +6171,25 @@
         const imageItem = items.find(item => item.kind === "file" && item.type.startsWith("image/"));
         const imageFile = imageItem?.getAsFile() ||
             Array.from(e.clipboardData?.files || []).find(file => file.type.startsWith("image/"));
-        if (!imageFile) return;
+        const text = e.clipboardData?.getData("text/plain") || "";
+        const at = getPasteTarget();
+        const clip = shapeClipboard;
 
-        e.preventDefault();
-        addImageBlob(imageFile);
+        // Nothing else can have been copied while the page kept focus, so the
+        // clipboard still holds our own copy: paste the shapes.
+        if (clip && !clip.maybeStale) {
+            e.preventDefault();
+            pasteShapes(clip.shapes, at);
+        } else if (imageFile) {
+            e.preventDefault();
+            pasteClipboardImage(imageFile, at);
+        } else if (text.trim()) {
+            e.preventDefault();
+            pasteText(text, at);
+        } else if (clip) {
+            e.preventDefault();
+            pasteShapes(clip.shapes, at);
+        }
     });
 
     function getDraggedImageFile(dataTransfer) {
