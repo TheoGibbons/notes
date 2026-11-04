@@ -280,6 +280,38 @@
             color: #444;
             font-variant-numeric: tabular-nums;
         }
+        .settings-panel #color-container,
+        .settings-panel #fill-container {
+            flex-wrap: wrap;
+        }
+        .swatches {
+            display: flex;
+            flex-wrap: wrap;
+            flex-basis: 100%;
+            gap: 4px;
+        }
+        .swatches[hidden] {
+            display: none;
+        }
+        .settings-panel .swatches button.swatch {
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border: 1px solid rgb(0 0 0 / 25%);
+            border-radius: 4px;
+            background: var(--swatch);
+        }
+        .settings-panel .swatches button.swatch[aria-pressed="true"] {
+            background: var(--swatch);
+            border-color: #fff;
+            outline: 2px solid #007bff;
+        }
+        .swatch-divider {
+            width: 1px;
+            align-self: stretch;
+            margin: 0 2px;
+            background: #ddd;
+        }
         .settings-panel input[type="color"] {
             margin-left: auto;
         }
@@ -621,6 +653,7 @@
     <div id="color-container" class="inline-group">
         <label class="group-label" for="pen-color">Color:</label>
         <input type="color" id="pen-color" value="#000000" />
+        <div class="swatches" id="pen-color-swatches" role="group" aria-label="Colour swatches"></div>
     </div>
 
     <div id="fill-container" class="inline-group">
@@ -628,6 +661,7 @@
             <input type="checkbox" id="fill-enabled" /> Fill:
         </label>
         <input type="color" id="fill-color" value="#ffff00" disabled />
+        <div class="swatches" id="fill-color-swatches" role="group" aria-label="Fill swatches"></div>
     </div>
 
     <div id="pen-size-container" class="inline-group">
@@ -843,6 +877,8 @@
     const cropResetButton = document.getElementById("crop-reset");
     const cropCancelButton = document.getElementById("crop-cancel");
 
+    const penColorSwatches = document.getElementById("pen-color-swatches");
+    const fillColorSwatches = document.getElementById("fill-color-swatches");
     const dashContainer = document.getElementById("dash-container");
     const dashButtons = dashContainer.querySelectorAll("button[data-dash]");
     const cornerContainer = document.getElementById("corner-container");
@@ -2428,9 +2464,17 @@
         const isColorDrawingTool = currentTool === "pen" || currentTool === "text" ||
             currentTool === "rect" || currentTool === "circle" ||
             currentTool === "arrow" || currentTool === "line";
-        const hasColorableSelection = selectedShapes.some(s => getShapeColorProperty(s));
+        const colorable = selectedShapesWith(s => getShapeColorProperty(s));
+        if (currentTool === "select" && colorable.length) {
+            const color = colorable[0][getShapeColorProperty(colorable[0])];
+            if (isHexColor(color)) {
+                penColor = color.toLowerCase();
+                penColorInput.value = penColor;
+            }
+        }
         colorContainer.style.display =
-            isColorDrawingTool || hasColorableSelection ? "inline-flex" : "none";
+            isColorDrawingTool || colorable.length ? "inline-flex" : "none";
+        updateSwatchPressedState();
     }
 
     function isFillableShape(shape) {
@@ -2454,6 +2498,8 @@
         fillColorInput.disabled = !fillEnabledInput.checked;
         const hideUncheckedTextFill = currentTool === "text" && !fillEnabledInput.checked;
         fillColorInput.style.display = hideUncheckedTextFill ? "none" : "inline-block";
+        fillColorSwatches.hidden = hideUncheckedTextFill;
+        updateSwatchPressedState();
     }
 
     const STYLED_DRAWING_TOOLS = ["pen", "text", "rect", "circle", "arrow", "line"];
@@ -2658,6 +2704,7 @@
             colorable.forEach(s => { s[getShapeColorProperty(s)] = penColor; });
             render();
         }
+        updateSwatchPressedState();
     });
 
     penColorInput.addEventListener("change", () => {
@@ -2683,6 +2730,7 @@
 
     fillColorInput.addEventListener("input", () => {
         fillColor = fillColorInput.value || "#ffff00";
+        updateSwatchPressedState();
         const fillable = fillEnabled ? selectedShapesWith(isFillableShape) : [];
         if (fillable.length) {
             fillable.forEach(s => { s.fillColor = fillColor; });
@@ -2855,6 +2903,135 @@
         eraserSizeValue.textContent = `${eraserSize} px`;
         updateEraserCursor();
     });
+
+    // Colour swatches: a fixed palette plus the colours used most recently.
+    const COLOR_PRESETS = [
+        "#000000", "#868e96", "#ffffff", "#e03131", "#f08c00",
+        "#fab005", "#2f9e44", "#1971c2", "#7048e8", "#c2255c",
+    ];
+    const FILL_PRESETS = [
+        "#ffffff", "#e9ecef", "#ffc9c9", "#ffd8a8", "#ffec99",
+        "#ffff00", "#b2f2bb", "#a5d8ff", "#d0bfff", "#fcc2d7",
+    ];
+    const RECENT_COLORS_KEY = "drawingPad_recentColors_v1";
+    const MAX_RECENT_COLORS = 8;
+    let recentColors = loadRecentColors();
+
+    function isHexColor(value) {
+        return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+    }
+
+    function loadRecentColors() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(RECENT_COLORS_KEY) || "[]");
+            return Array.isArray(parsed)
+                ? parsed.filter(isHexColor).map(color => color.toLowerCase()).slice(0, MAX_RECENT_COLORS)
+                : [];
+        } catch {
+            return [];
+        }
+    }
+
+    function rememberColor(color) {
+        if (!isHexColor(color)) return;
+        const normalized = color.toLowerCase();
+        if (recentColors[0] === normalized) return;
+        recentColors = [normalized, ...recentColors.filter(c => c !== normalized)]
+            .slice(0, MAX_RECENT_COLORS);
+        try {
+            localStorage.setItem(RECENT_COLORS_KEY, JSON.stringify(recentColors));
+        } catch {
+            // Recent colours are a convenience; without storage they last the session.
+        }
+        renderSwatches();
+    }
+
+    function renderSwatchRow(container, presets) {
+        container.textContent = "";
+        const addSwatch = (color, label) => {
+            const swatch = document.createElement("button");
+            swatch.type = "button";
+            swatch.className = "swatch";
+            swatch.dataset.color = color;
+            swatch.style.setProperty("--swatch", color);
+            swatch.title = label;
+            swatch.setAttribute("aria-label", label);
+            container.appendChild(swatch);
+        };
+        presets.forEach(color => addSwatch(color, color));
+        const recents = recentColors.filter(color => !presets.includes(color));
+        if (recents.length) {
+            const divider = document.createElement("span");
+            divider.className = "swatch-divider";
+            divider.setAttribute("aria-hidden", "true");
+            container.appendChild(divider);
+            recents.forEach(color => addSwatch(color, `Recent: ${color}`));
+        }
+    }
+
+    function renderSwatches() {
+        renderSwatchRow(penColorSwatches, COLOR_PRESETS);
+        renderSwatchRow(fillColorSwatches, FILL_PRESETS);
+        updateSwatchPressedState();
+    }
+
+    function updateSwatchPressedState() {
+        const current = penColor.toLowerCase();
+        penColorSwatches.querySelectorAll("button.swatch").forEach(swatch => {
+            swatch.setAttribute("aria-pressed", String(swatch.dataset.color === current));
+        });
+        const currentFill = fillEnabled ? fillColor.toLowerCase() : null;
+        fillColorSwatches.querySelectorAll("button.swatch").forEach(swatch => {
+            swatch.setAttribute("aria-pressed", String(swatch.dataset.color === currentFill));
+        });
+    }
+
+    function pickPenColor(color) {
+        penColor = color;
+        penColorInput.value = color;
+        const colorable = selectedShapesWith(s => getShapeColorProperty(s));
+        if (colorable.length) {
+            colorable.forEach(s => { s[getShapeColorProperty(s)] = color; });
+            if (currentTextEditor && colorable.includes(currentTextEditor.shape)) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+            }
+            pushHistory();
+            render();
+        }
+        rememberColor(color);
+        updateSwatchPressedState();
+    }
+
+    // Picking a fill swatch also switches the fill on.
+    function pickFillColor(color) {
+        fillColor = color;
+        fillColorInput.value = color;
+        fillEnabled = true;
+        fillEnabledInput.checked = true;
+        const fillable = selectedShapesWith(isFillableShape);
+        if (fillable.length) {
+            fillable.forEach(s => { s.fillColor = color; });
+            if (currentTextEditor && fillable.includes(currentTextEditor.shape)) {
+                positionTextEditor(currentTextEditor.shape, currentTextEditor.input);
+            }
+            pushHistory();
+            render();
+        }
+        rememberColor(color);
+        updateFillVisibility();
+    }
+
+    penColorSwatches.addEventListener("click", (e) => {
+        const swatch = e.target.closest("button.swatch");
+        if (swatch) pickPenColor(swatch.dataset.color);
+    });
+    fillColorSwatches.addEventListener("click", (e) => {
+        const swatch = e.target.closest("button.swatch");
+        if (swatch) pickFillColor(swatch.dataset.color);
+    });
+    penColorInput.addEventListener("change", () => rememberColor(penColorInput.value));
+    fillColorInput.addEventListener("change", () => rememberColor(fillColorInput.value));
+    renderSwatches();
 
     // Initialize controls
     penColorInput.value = penColor;
