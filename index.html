@@ -628,6 +628,13 @@
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
 
+    // Mac keyboards use Cmd where Windows and Linux use Ctrl; both are accepted
+    // everywhere, this only decides how shortcuts are labelled.
+    const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(
+        navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || ""
+    );
+    const MOD_KEY_LABEL = IS_MAC ? "⌘" : "Ctrl";
+
     const toolbarButtons = document.querySelectorAll(".toolbar button[data-tool]");
     const clearButton = document.getElementById("clear");
     const undoButton = document.getElementById("undo");
@@ -2342,11 +2349,29 @@
         v: "select",
     };
 
-    // Keyboard shortcuts
+    function deleteSelectedShapes() {
+        if (!selectedShapes.length) return;
+        cancelImageCrop();
+        const doomed = selectedShapes;
+        const remaining = shapes.filter(s => !doomed.includes(s));
+        clearSelection();
+        if (remaining.length !== shapes.length) {
+            shapes = remaining;
+            pushHistory();
+        }
+        updateControlVisibility();
+        render();
+    }
+
+    // Keyboard shortcuts. Ctrl and Cmd are interchangeable throughout, so the
+    // same shortcuts work on Windows, Linux and macOS.
     window.addEventListener("keydown", (e) => {
         const targetIsEditable = e.target instanceof HTMLInputElement ||
             e.target instanceof HTMLTextAreaElement || e.target?.isContentEditable;
         const targetIsButton = e.target instanceof HTMLButtonElement;
+        const targetIsSelect = e.target instanceof HTMLSelectElement;
+        const mod = e.ctrlKey || e.metaKey;
+        const key = e.key.toLowerCase();
 
         // The Save Image dialog owns the keyboard while it is open, so canvas
         // shortcuts cannot fire behind it (Enter submits the form as usual).
@@ -2379,63 +2404,50 @@
         } else if (e.key === "Enter" && cropSession && !targetIsEditable && !targetIsButton) {
             e.preventDefault();
             applyImageCrop();
-        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
-            e.key.toLowerCase() === "s") {
+        } else if (mod && !e.shiftKey && !e.altKey && key === "s") {
             // The shortcut is the quick path: straight to PNG, no padding, no
             // dialog. Use the menu item when those need to change.
             e.preventDefault();
             closeSaveMenu();
             saveImage();
-        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
-            e.key.toLowerCase() === "a" && !targetIsEditable) {
+        } else if (mod && !e.shiftKey && !e.altKey && key === "a" && !targetIsEditable) {
             e.preventDefault();
             selectAllShapes();
-        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
-            e.key.toLowerCase() === "c" && !targetIsEditable && selectedShapes.length) {
+        } else if (mod && !e.shiftKey && !e.altKey && key === "c" && !targetIsEditable &&
+            selectedShapes.length) {
             e.preventDefault();
             copySelectedShapesToClipboard();
-        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
-            e.key.toLowerCase() === "d" && !targetIsEditable) {
+        } else if (mod && !e.shiftKey && !e.altKey && key === "d" && !targetIsEditable) {
             // Always swallow the key, selection or not, so the browser's
             // bookmark dialog never opens over the canvas.
             e.preventDefault();
             duplicateSelectedShapes();
-        } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
-            e.key.toLowerCase() === "n" && !targetIsEditable) {
+        } else if (mod && !e.shiftKey && !e.altKey && key === "n" && !targetIsEditable) {
             // Start a blank page. Undo still brings the drawing back, since
             // Clear pushes the empty canvas onto the history stack.
             e.preventDefault();
             closeSaveMenu();
             clearButton.click();
-        } else if (e.key === "Delete" && selectedShapes.length && !targetIsEditable) {
+        } else if ((e.key === "Delete" || e.key === "Backspace") && selectedShapes.length &&
+            !targetIsEditable && !targetIsSelect) {
+            // Backspace too: it is the delete key on a Mac keyboard.
             e.preventDefault();
-            cancelImageCrop();
-            const doomed = selectedShapes;
-            const remaining = shapes.filter(s => !doomed.includes(s));
-            clearSelection();
-            if (remaining.length !== shapes.length) {
-                shapes = remaining;
-                pushHistory();
-            }
-            updateControlVisibility();
-            render();
+            deleteSelectedShapes();
         } else if (NUDGE_DIRECTIONS[e.key] && selectedShapes.length && !targetIsEditable &&
-            !(e.target instanceof HTMLSelectElement) && !currentTextEditor && !cropSession &&
-            !hasActiveMouseInteraction() && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            !targetIsSelect && !currentTextEditor && !cropSession &&
+            !hasActiveMouseInteraction() && !mod && !e.altKey) {
             // Skipped mid-drag: the drag positions shapes from where it started
             // and would undo the nudge on the next mouse move anyway.
             e.preventDefault();
             nudgeSelectedShapes(NUDGE_DIRECTIONS[e.key], e.shiftKey, e.repeat);
         } else if (e.key === " " && !targetIsEditable && !targetIsButton && !currentTextEditor &&
-            currentTool !== "text" && !(e.target instanceof HTMLSelectElement) &&
-            !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
+            currentTool !== "text" && !targetIsSelect && !mod && !e.altKey && !e.repeat) {
             e.preventDefault();
             zoomToFitShapes();
-        } else if (!targetIsEditable && !e.ctrlKey && !e.metaKey && !e.altKey &&
-            !e.repeat && toolHotkeys[e.key.toLowerCase()]) {
+        } else if (!targetIsEditable && !mod && !e.altKey && !e.repeat && toolHotkeys[key]) {
             e.preventDefault();
             stopAllInteractions(true);
-            const tool = toolHotkeys[e.key.toLowerCase()];
+            const tool = toolHotkeys[key];
             if (tool === "image") {
                 insertImageButton.click();
             } else {
@@ -2443,11 +2455,11 @@
                     .find(button => button.dataset.tool === tool);
                 toolButton?.click();
             }
-        } else if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "z") {
+        } else if (mod && !e.shiftKey && !e.altKey && key === "z" && !targetIsEditable) {
             e.preventDefault();
             undoButton.click();
-        } else if ((e.ctrlKey && e.key.toLowerCase() === "y") ||
-            (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "z")) {
+        } else if (mod && !e.altKey && !targetIsEditable &&
+            ((!e.shiftKey && key === "y") || (e.shiftKey && key === "z"))) {
             e.preventDefault();
             redoButton.click();
         }
@@ -4283,6 +4295,8 @@
 
     // Mouse handling
     canvas.addEventListener("mousedown", (e) => {
+        // On a Mac, Ctrl+click is a right-click: leave it to the context menu.
+        if (IS_MAC && e.ctrlKey && e.button === 0) return;
         commitCurrentTextEditor();
 
         // Middle mouse: always pan
@@ -4604,6 +4618,13 @@
         e.preventDefault();
         addImageBlob(imageFile, screenToWorld(e.clientX, e.clientY));
     });
+
+    // Tooltips are written with Ctrl; show the Command key on a Mac.
+    if (IS_MAC) {
+        document.querySelectorAll("[title]").forEach(element => {
+            element.title = element.title.replace(/\bCtrl\+/g, "⌘");
+        });
+    }
 
     // Initial history snapshot
     pushHistory();
