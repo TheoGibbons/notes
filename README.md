@@ -107,6 +107,9 @@ python tools/make-icons.py
 - **Rotate:** Select a pen stroke, rectangle, ellipse, image, or text item and drag the blue
   rotation handle above it. Drag either endpoint of a line or arrow to resize and
   rotate it. The arrowhead scales along with the **Size** control.
+- **Arrowhead style:** With the Arrow tool active, or arrows selected, use
+  **Arrowhead** in the floating settings panel to put the head at the **Start**
+  (where you began dragging), the **End**, or **Both** ends.
 - **Fill text or shapes:** Choose **Fill** while using the Text, Rectangle, or
   Circle tool, or select existing items and change their fill together.
 - **Save an image:** Choose **Save Image…** from the **Save/Import** menu to pick

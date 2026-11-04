@@ -225,6 +225,7 @@
         #fill-container,
         #layer-container,
         #crop-container,
+        #arrow-head-container,
         #text-size-container {
             display: none;
             align-items: center;
@@ -275,17 +276,25 @@
             flex: 1;
         }
         .settings-panel #layer-container,
-        .settings-panel #crop-container {
+        .settings-panel #crop-container,
+        .settings-panel #arrow-head-container {
             flex-wrap: wrap;
         }
         .settings-panel #layer-container .group-label,
-        .settings-panel #crop-container .group-label {
+        .settings-panel #crop-container .group-label,
+        .settings-panel #arrow-head-container .group-label {
             flex-basis: 100%;
         }
         .settings-panel #layer-container button,
-        .settings-panel #crop-container button {
+        .settings-panel #crop-container button,
+        .settings-panel #arrow-head-container button {
             flex: 1;
             white-space: nowrap;
+        }
+        .settings-panel button[aria-pressed="true"] {
+            background: #007bff;
+            color: #fff;
+            border-color: #007bff;
         }
         #crop-apply {
             background: #007bff;
@@ -524,6 +533,16 @@
         <input type="number" id="pen-size-value" min="0.01" step="0.01" value="2" aria-label="Size value" />
     </div>
 
+    <div id="arrow-head-container" class="inline-group" role="group" aria-labelledby="arrow-head-label">
+        <span class="group-label" id="arrow-head-label">Arrowhead:</span>
+        <button type="button" data-arrow-head="start" aria-pressed="false"
+                title="Arrowhead at the start, where you began dragging">← Start</button>
+        <button type="button" data-arrow-head="end" aria-pressed="true"
+                title="Arrowhead at the end, where you let go">End →</button>
+        <button type="button" data-arrow-head="both" aria-pressed="false"
+                title="Arrowheads at both ends">↔ Both</button>
+    </div>
+
     <div id="text-size-container" class="inline-group">
         <label class="group-label" for="text-size">Text size:</label>
         <input type="range" id="text-size" min="1" max="72" value="20" />
@@ -652,6 +671,8 @@
     const textSizeContainer = document.getElementById("text-size-container");
     const textSizeInput = document.getElementById("text-size");
     const textSizeValueInput = document.getElementById("text-size-value");
+    const arrowHeadContainer = document.getElementById("arrow-head-container");
+    const arrowHeadButtons = arrowHeadContainer.querySelectorAll("button[data-arrow-head]");
     const layerContainer = document.getElementById("layer-container");
     const sendToBackButton = document.getElementById("send-to-back");
     const bringToFrontButton = document.getElementById("bring-to-front");
@@ -676,7 +697,8 @@
     // text:   { type: 'text', x, y, text, fontSize, color, fillColor, rotation }
     // rect:   { type: 'rect', x, y, width, height, rotation, strokeColor, fillColor, strokeWidth }
     // circle: { type: 'circle', x, y, rx, ry, rotation, strokeColor, fillColor, strokeWidth }
-    // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth }
+    // arrow:  { type: 'arrow', x, y, length, rotation, strokeColor, strokeWidth, arrowHead }
+    //         arrowHead is 'start', 'end' or 'both'; older drawings without it mean 'end'.
     // line:   { type: 'line', x, y, length, rotation, strokeColor, strokeWidth }
     // image:  { type: 'image', x, y, width, height, rotation, src, crop? }
     //         crop is the visible part of the source image as fractions of it:
@@ -908,6 +930,7 @@
     let textSize = 20;
     let fillEnabled = false;
     let fillColor = "#ffff00";
+    let arrowHead = "end";
     const ERASER_RADIUS = 10;   // screen px
     const HIT_TEST_RADIUS = 8;  // screen px
 
@@ -1272,32 +1295,47 @@
         return Math.min(Math.max(6, strokeWidth * 5), length * 0.5);
     }
 
+    // Which end(s) of an arrow carry a head. "start" is where the drag began
+    // (the segment's local -x end) and "end" is where it finished (+x).
+    const ARROW_HEAD_STYLES = ["start", "end", "both"];
+
+    function getArrowHeadStyle(shape) {
+        return ARROW_HEAD_STYLES.includes(shape?.arrowHead) ? shape.arrowHead : "end";
+    }
+
     function drawSegmentShape(shape, scale, viewCamera = camera) {
         const len = shape.length ?? 0;
         if (len <= 0) return;
         const strokeWidth = shape.strokeWidth || 2;
-        const hasHead = shape.type === "arrow";
+        const headStyle = shape.type === "arrow" ? getArrowHeadStyle(shape) : null;
+        const hasStartHead = headStyle === "start" || headStyle === "both";
+        const hasEndHead = headStyle === "end" || headStyle === "both";
         const headLength = getArrowHeadLength(shape);
         const half = len / 2;
+        const color = shape.strokeColor || "#000000";
         drawTransformedShape(shape, scale, () => {
-            ctx.strokeStyle = shape.strokeColor || "#000000";
+            ctx.strokeStyle = color;
             ctx.lineWidth = strokeWidth;
             ctx.lineCap = "round";
             ctx.beginPath();
-            ctx.moveTo(-half, 0);
-            ctx.lineTo(half - headLength, 0);
+            ctx.moveTo(-half + (hasStartHead ? headLength : 0), 0);
+            ctx.lineTo(half - (hasEndHead ? headLength : 0), 0);
             ctx.stroke();
 
-            if (!hasHead) return;
-
-            // arrowhead at end (right side)
-            ctx.beginPath();
-            ctx.moveTo(half, 0);
-            ctx.lineTo(half - headLength, headLength / 2);
-            ctx.lineTo(half - headLength, -headLength / 2);
-            ctx.closePath();
-            ctx.fillStyle = shape.strokeColor || "#000000";
-            ctx.fill();
+            // direction is +1 for the end (right side) and -1 for the start.
+            ctx.fillStyle = color;
+            const drawHead = (direction) => {
+                const tip = half * direction;
+                const base = tip - headLength * direction;
+                ctx.beginPath();
+                ctx.moveTo(tip, 0);
+                ctx.lineTo(base, headLength / 2);
+                ctx.lineTo(base, -headLength / 2);
+                ctx.closePath();
+                ctx.fill();
+            };
+            if (hasStartHead) drawHead(-1);
+            if (hasEndHead) drawHead(1);
         }, viewCamera);
     }
 
@@ -1965,6 +2003,18 @@
         fillColorInput.style.display = hideUncheckedTextFill ? "none" : "inline-block";
     }
 
+    function updateArrowHeadVisibility() {
+        const arrows = selectedShapesWith(s => s.type === "arrow");
+        if (currentTool === "select" && arrows.length) {
+            arrowHead = getArrowHeadStyle(arrows[0]);
+        }
+        arrowHeadContainer.style.display =
+            currentTool === "arrow" || arrows.length ? "inline-flex" : "none";
+        arrowHeadButtons.forEach(button => {
+            button.setAttribute("aria-pressed", String(button.dataset.arrowHead === arrowHead));
+        });
+    }
+
     function updateLayerVisibility() {
         const indices = selectedShapes
             .map(s => shapes.indexOf(s))
@@ -1995,6 +2045,7 @@
             colorContainer,
             fillContainer,
             penSizeContainer,
+            arrowHeadContainer,
             textSizeContainer,
             layerContainer,
             cropContainer,
@@ -2009,6 +2060,7 @@
         updateTextSizeVisibility();
         updateColorVisibility();
         updateFillVisibility();
+        updateArrowHeadVisibility();
         updateLayerVisibility();
         updateCropVisibility();
         updateSettingsPanelVisibility();
@@ -2161,6 +2213,20 @@
             return;
         }
         if (selectedShapes.some(s => getShapeWidthProperty(s))) pushHistory();
+    });
+
+    arrowHeadButtons.forEach(button => {
+        button.addEventListener("click", () => {
+            arrowHead = button.dataset.arrowHead;
+            const changed = selectedShapesWith(s =>
+                s.type === "arrow" && getArrowHeadStyle(s) !== arrowHead);
+            if (changed.length) {
+                changed.forEach(s => { s.arrowHead = arrowHead; });
+                pushHistory();
+                render();
+            }
+            updateArrowHeadVisibility();
+        });
     });
 
     function applyTextSize(value) {
@@ -2701,12 +2767,14 @@
                 };
             }
             if (shape.type === "arrow" || shape.type === "line") {
-                return {
+                const segment = {
                     ...common,
                     length: positive(shape.length, 10),
                     strokeColor: typeof shape.strokeColor === "string" ? shape.strokeColor : "#000000",
                     strokeWidth: positive(shape.strokeWidth, 2),
                 };
+                if (shape.type === "arrow") segment.arrowHead = getArrowHeadStyle(shape);
+                return segment;
             }
             if (shape.type === "image") {
                 if (typeof shape.src !== "string" || !shape.src) {
@@ -3828,6 +3896,7 @@
                 strokeColor: penColor,
                 strokeWidth: penWidth,
             };
+            if (tool === "arrow") draftShape.arrowHead = arrowHead;
         }
 
         shapes.push(draftShape);
