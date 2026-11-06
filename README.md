@@ -11,7 +11,8 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Select one item or many, then move, resize, rotate, restyle, reorder, or delete
   them together
 - Copy, cut and paste shapes; paste images or text from other apps
-- Insert, paste, or drag and drop images, then crop them non-destructively
+- Insert, paste, or drag and drop images, crop them non-destructively, and give
+  them a border
 - Adjustable stroke size, line style (solid, dashed, dotted), opacity, text size,
   rounded rectangle corners, pen smoothing, and color — with colour swatches and
   your recent colours
@@ -149,6 +150,10 @@ Shortcuts below say `Ctrl`; on a Mac, `Cmd` works everywhere `Ctrl` does. Press
   the image — starts from the full original.
 - **Add an image:** Click **Image**, paste an image with `Ctrl+V`, or drop an image
   file onto the canvas. Pasted and dropped images are placed at the pointer.
+- **Border an image:** Select one or more images and tick **Border** in the floating
+  settings panel (or pick a swatch), then choose its colour and **Border size**. The
+  border goes around the outside of the picture, so it hides none of it, and stays
+  the same width when you resize the image. New images start without a border.
 - **Lines and arrows:** Drag either endpoint of a line or arrow to resize and
   rotate it (`Shift` snaps it to 15° steps). The arrowhead scales along with the
   **Size** control.

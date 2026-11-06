@@ -386,6 +386,8 @@
         #dash-container,
         #corner-container,
         #smoothing-container,
+        #border-container,
+        #border-size-container,
         #opacity-container,
         #eraser-mode-container,
         #eraser-size-container,
@@ -439,7 +441,8 @@
             font-variant-numeric: tabular-nums;
         }
         .settings-panel #color-container,
-        .settings-panel #fill-container {
+        .settings-panel #fill-container,
+        .settings-panel #border-container {
             flex-wrap: wrap;
         }
         .swatches {
@@ -1057,6 +1060,20 @@
         <output class="setting-value" id="smoothing-value" for="smoothing">0%</output>
     </div>
 
+    <div id="border-container" class="inline-group">
+        <label class="group-label" for="border-enabled">
+            <input type="checkbox" id="border-enabled" /> Border:
+        </label>
+        <input type="color" id="border-color" value="#000000" disabled />
+        <div class="swatches" id="border-color-swatches" role="group" aria-label="Border swatches"></div>
+    </div>
+
+    <div id="border-size-container" class="inline-group">
+        <label class="group-label" for="border-width">Border size:</label>
+        <input type="range" id="border-width" min="1" max="50" value="4" />
+        <output class="setting-value" id="border-width-value" for="border-width">4 px</output>
+    </div>
+
     <div id="opacity-container" class="inline-group">
         <label class="group-label" for="opacity">Opacity:</label>
         <input type="range" id="opacity" min="10" max="100" step="5" value="100" />
@@ -1274,6 +1291,13 @@
     const smoothingContainer = document.getElementById("smoothing-container");
     const smoothingInput = document.getElementById("smoothing");
     const smoothingValue = document.getElementById("smoothing-value");
+    const borderContainer = document.getElementById("border-container");
+    const borderEnabledInput = document.getElementById("border-enabled");
+    const borderColorInput = document.getElementById("border-color");
+    const borderColorSwatches = document.getElementById("border-color-swatches");
+    const borderSizeContainer = document.getElementById("border-size-container");
+    const borderWidthInput = document.getElementById("border-width");
+    const borderWidthValue = document.getElementById("border-width-value");
     const opacityContainer = document.getElementById("opacity-container");
     const opacityInput = document.getElementById("opacity");
     const opacityValue = document.getElementById("opacity-value");
@@ -1329,6 +1353,8 @@
     //         dash         stroke/rect/circle/arrow/line: 'solid' | 'dashed' | 'dotted'
     //         cornerRadius rect, in world units (default 0)
     //         smoothing    stroke, 0..100 (default 0: drawn through the raw points)
+    //         borderWidth  image, in world units (default 0: no border)
+    //         borderColor  image, set whenever borderWidth is
     let shapes = [];
     let cleanShapesSnapshot = JSON.stringify(shapes);
     let isDirty = false;
@@ -1595,6 +1621,11 @@
     let dashStyle = "solid";
     let cornerRadius = 0;       // world units
     let penSmoothing = 0;       // 0..100, for new pen strokes
+    // What the Border controls show. New images start without a border, as they
+    // do with full opacity; these are what the next image to get one starts from.
+    let imageBorderEnabled = false;
+    let imageBorderColor = "#000000";
+    let imageBorderWidth = 4;   // world units
     let eraserSize = 20;        // diameter, screen px
     let eraserMode = "partial"; // 'partial' rubs out part of a stroke, 'whole' removes items
     const HIT_TEST_RADIUS = 8;  // screen px
@@ -1818,6 +1849,30 @@
         return Number.isFinite(radius) && radius > 0 ? radius : 0;
     }
 
+    // An image's border in world units: 0 without one, and for every other shape.
+    function getImageBorderWidth(shape) {
+        if (shape?.type !== "image") return 0;
+        const width = Number(shape.borderWidth);
+        return Number.isFinite(width) && width > 0 ? width : 0;
+    }
+
+    // The border goes around the outside of the picture, so it hides none of it.
+    // It reaches slightly back over the edge, because two shapes that only touch
+    // show a hairline gap when they are rotated.
+    const IMAGE_BORDER_OVERLAP = 0.5;
+
+    // The line to stroke, centred on the image, for a border of a given width.
+    function getImageBorderLine(width, height, border) {
+        const offset = (border - IMAGE_BORDER_OVERLAP) / 2;
+        return {
+            x: -width / 2 - offset,
+            y: -height / 2 - offset,
+            width: width + offset * 2,
+            height: height + offset * 2,
+            lineWidth: border + IMAGE_BORDER_OVERLAP,
+        };
+    }
+
     function getStrokeSmoothing(shape) {
         const smoothing = Number(shape?.smoothing);
         return Number.isFinite(smoothing) ? Math.min(100, Math.max(0, smoothing)) : 0;
@@ -1857,7 +1912,7 @@
     }
 
     function needsOpacityLayer(shape) {
-        if (shape.type === "arrow") return true;
+        if (shape.type === "arrow" || getImageBorderWidth(shape) > 0) return true;
         return (shape.type === "rect" || shape.type === "circle" || shape.type === "text") &&
             !!shape.fillColor;
     }
@@ -1893,6 +1948,9 @@
         layer.setTransform(1, 0, 0, 1, 0, 0);
         layer.clearRect(left, top, right - left, bottom - top);
         layer.setTransform(ratio, 0, 0, ratio, 0, 0);
+        // A saved picture asks for high-quality scaling; images on the layer get it too.
+        layer.imageSmoothingEnabled = target.imageSmoothingEnabled;
+        layer.imageSmoothingQuality = target.imageSmoothingQuality;
         ctx = layer;
         try {
             drawShapeContent(s, scale, viewCamera);
@@ -2285,6 +2343,14 @@
 
         drawCroppedImage(img, getImageCrop(shape),
             -width / 2 * scale, -height / 2 * scale, width * scale, height * scale);
+
+        const border = getImageBorderWidth(shape);
+        if (border > 0) {
+            const line = getImageBorderLine(width * scale, height * scale, border * scale);
+            ctx.strokeStyle = shape.borderColor || "#000000";
+            ctx.lineWidth = line.lineWidth;
+            ctx.strokeRect(line.x, line.y, line.width, line.height);
+        }
 
         ctx.restore();
     }
@@ -2974,6 +3040,32 @@
         smoothingValue.textContent = `${penSmoothing}%`;
     }
 
+    function getSelectedImages() {
+        return selectedShapesWith(s => s.type === "image");
+    }
+
+    function updateBorderVisibility() {
+        // The crop overlay draws the whole picture without its border, so the
+        // controls come back once cropping is over.
+        const images = cropSession ? [] : getSelectedImages();
+        if (images.length) {
+            const width = getImageBorderWidth(images[0]);
+            imageBorderEnabled = width > 0;
+            if (imageBorderEnabled) {
+                imageBorderWidth = width;
+                imageBorderColor = images[0].borderColor || imageBorderColor;
+            }
+        }
+        borderContainer.style.display = images.length ? "inline-flex" : "none";
+        borderSizeContainer.style.display = images.length && imageBorderEnabled ? "inline-flex" : "none";
+        borderEnabledInput.checked = imageBorderEnabled;
+        borderColorInput.disabled = !imageBorderEnabled;
+        borderColorInput.value = imageBorderColor;
+        borderWidthInput.value = String(Math.round(imageBorderWidth));
+        borderWidthValue.textContent = `${Math.round(imageBorderWidth)} px`;
+        updateSwatchPressedState();
+    }
+
     function updateEraserVisibility() {
         const isEraser = currentTool === "eraser";
         eraserModeContainer.style.display = isEraser ? "inline-flex" : "none";
@@ -3028,6 +3120,8 @@
             dashContainer,
             cornerContainer,
             smoothingContainer,
+            borderContainer,
+            borderSizeContainer,
             opacityContainer,
             eraserModeContainer,
             eraserSizeContainer,
@@ -3049,6 +3143,7 @@
         updateDashVisibility();
         updateCornerVisibility();
         updateSmoothingVisibility();
+        updateBorderVisibility();
         updateOpacityVisibility();
         updateEraserVisibility();
         updateArrowHeadVisibility();
@@ -3352,6 +3447,56 @@
         if (selectedShapes.some(s => s.type === "stroke")) pushHistory();
     });
 
+    // The Border controls read as "on" here, so an image in a mixed selection
+    // that has no border yet gets one, keeping any width or colour of its own.
+    function setImageBorderColor(color) {
+        imageBorderColor = color;
+        getSelectedImages().forEach(s => {
+            s.borderColor = color;
+            s.borderWidth = getImageBorderWidth(s) || imageBorderWidth;
+        });
+        render();
+    }
+
+    function setImageBorderWidth(width) {
+        imageBorderWidth = width;
+        getSelectedImages().forEach(s => {
+            s.borderWidth = width;
+            s.borderColor = s.borderColor || imageBorderColor;
+        });
+        render();
+    }
+
+    borderEnabledInput.addEventListener("change", () => {
+        getSelectedImages().forEach(s => {
+            if (borderEnabledInput.checked) {
+                s.borderWidth = imageBorderWidth;
+                s.borderColor = imageBorderColor;
+            } else {
+                delete s.borderWidth;
+                delete s.borderColor;
+            }
+        });
+        pushHistory();
+        render();
+        updateControlVisibility();
+    });
+
+    borderColorInput.addEventListener("input", () => {
+        setImageBorderColor(borderColorInput.value);
+        updateSwatchPressedState();
+    });
+    borderColorInput.addEventListener("change", () => {
+        pushHistory();
+        rememberColor(borderColorInput.value);
+    });
+
+    borderWidthInput.addEventListener("input", () => {
+        setImageBorderWidth(Number(borderWidthInput.value));
+        borderWidthValue.textContent = `${borderWidthInput.value} px`;
+    });
+    borderWidthInput.addEventListener("change", () => pushHistory());
+
     dashButtons.forEach(button => {
         button.addEventListener("click", () => {
             dashStyle = button.dataset.dash;
@@ -3446,6 +3591,7 @@
     function renderSwatches() {
         renderSwatchRow(penColorSwatches, COLOR_PRESETS);
         renderSwatchRow(fillColorSwatches, FILL_PRESETS);
+        renderSwatchRow(borderColorSwatches, COLOR_PRESETS);
         updateSwatchPressedState();
     }
 
@@ -3457,6 +3603,10 @@
         const currentFill = fillEnabled ? fillColor.toLowerCase() : null;
         fillColorSwatches.querySelectorAll("button.swatch").forEach(swatch => {
             swatch.setAttribute("aria-pressed", String(swatch.dataset.color === currentFill));
+        });
+        const currentBorder = imageBorderEnabled ? imageBorderColor.toLowerCase() : null;
+        borderColorSwatches.querySelectorAll("button.swatch").forEach(swatch => {
+            swatch.setAttribute("aria-pressed", String(swatch.dataset.color === currentBorder));
         });
     }
 
@@ -3502,6 +3652,15 @@
     fillColorSwatches.addEventListener("click", (e) => {
         const swatch = e.target.closest("button.swatch");
         if (swatch) pickFillColor(swatch.dataset.color);
+    });
+    // Picking a border swatch also switches the border on, as with fills.
+    borderColorSwatches.addEventListener("click", (e) => {
+        const swatch = e.target.closest("button.swatch");
+        if (!swatch) return;
+        setImageBorderColor(swatch.dataset.color);
+        pushHistory();
+        rememberColor(swatch.dataset.color);
+        updateControlVisibility();
     });
     penColorInput.addEventListener("change", () => rememberColor(penColorInput.value));
     fillColorInput.addEventListener("change", () => rememberColor(fillColorInput.value));
@@ -4245,12 +4404,21 @@
             // A nested <svg> whose viewBox is the crop window, over the image
             // stretched to a 1×1 square, shows exactly the cropped part.
             const crop = getImageCrop(shape);
+            const border = getImageBorderWidth(shape);
+            let frame = "";
+            if (border > 0) {
+                const line = getImageBorderLine(shape.width, shape.height, border);
+                frame = `<rect x="${svgNumber(line.x)}" y="${svgNumber(line.y)}"` +
+                    ` width="${svgNumber(line.width)}" height="${svgNumber(line.height)}" fill="none"` +
+                    ` stroke="${escapeXml(shape.borderColor || "#000000")}"` +
+                    ` stroke-width="${svgNumber(line.lineWidth)}"/>`;
+            }
             return `<g${opacityAttribute}${place(shape.x, shape.y)}>` +
                 `<svg x="${svgNumber(-shape.width / 2)}" y="${svgNumber(-shape.height / 2)}"` +
                 ` width="${svgNumber(shape.width)}" height="${svgNumber(shape.height)}"` +
                 ` viewBox="${crop.x} ${crop.y} ${crop.width} ${crop.height}" preserveAspectRatio="none">` +
                 `<image width="1" height="1" preserveAspectRatio="none" xlink:href="${escapeXml(shape.src)}"/>` +
-                `</svg></g>`;
+                `</svg>${frame}</g>`;
         }
         return "";
     }
@@ -4394,6 +4562,11 @@
         const smoothing = Number(source.smoothing);
         if (shape.type === "stroke" && Number.isFinite(smoothing) && smoothing > 0) {
             shape.smoothing = Math.min(100, smoothing);
+        }
+        const borderWidth = Number(source.borderWidth);
+        if (shape.type === "image" && Number.isFinite(borderWidth) && borderWidth > 0) {
+            shape.borderWidth = borderWidth;
+            shape.borderColor = typeof source.borderColor === "string" ? source.borderColor : "#000000";
         }
         return shape;
     }
@@ -5230,7 +5403,7 @@
     // against a padded half-width/half-height box.
     function hitTestRectLike(shape, wx, wy, radiusWorld) {
         const local = worldToLocalForShape(shape, wx, wy);
-        const pad = radiusWorld || 0;
+        const pad = (radiusWorld || 0) + getImageBorderWidth(shape);
         const bounds = getShapeBounds(shape);
         const halfW = (bounds?.width || 0) / 2 + pad;
         const halfH = (bounds?.height || 0) / 2 + pad;
@@ -5432,8 +5605,10 @@
         const rotation = shape.rotation || 0;
         const cosR = Math.abs(Math.cos(rotation));
         const sinR = Math.abs(Math.sin(rotation));
-        const halfBoxW = bounds.width / 2;
-        const halfBoxH = bounds.height / 2;
+        // An image's border turns with it, so its corners count towards the box.
+        const border = getImageBorderWidth(shape);
+        const halfBoxW = bounds.width / 2 + border;
+        const halfBoxH = bounds.height / 2 + border;
 
         let halfW;
         let halfH;
