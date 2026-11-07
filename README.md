@@ -96,6 +96,9 @@ Shortcuts below say `Ctrl`; on a Mac, `Cmd` works everywhere `Ctrl` does. Press
   colour (with swatches and your recent colours), fill, size, line style (solid,
   dashed or dotted), corner rounding for rectangles, smoothing for pen strokes, and
   opacity. Each setting applies to new items and to every selected item it suits.
+  The **−** / **+** button in its title bar minimises and expands it, and it stays
+  minimised as you select other items or change tools. It opens by itself during
+  a crop, for the Apply and Cancel buttons, then goes back.
 - **Change order:** Use **Send to Back** or **Bring to Front** in the floating
   settings panel when one or more items are selected.
 - **Add text:** Select **Text**, click on the canvas, and enter your text.
