@@ -19,8 +19,8 @@ An in-browser drawing pad built with plain HTML5 canvas and vanilla JavaScript. 
 - Optional rectangle, ellipse, and text fills; rotate text and geometric shapes
 - `Shift` draws squares, circles and 15° lines, and snaps rotation to 15°
 - An eraser that rubs out just part of a pen stroke, with an adjustable size
-- Zoom with the mouse wheel, a trackpad pinch, the zoom buttons or keyboard;
-  pan with a trackpad, the Hand tool or the middle mouse button
+- Zoom with the mouse wheel, a trackpad scroll or pinch, the zoom buttons or
+  keyboard; pan with the Hand tool or the middle mouse button
 - Right-click menu, and a keyboard shortcut list (`?`)
 - Undo/Redo history
 - Save as a high-resolution PNG, JPEG, WebP, vector SVG or PDF — trimmed to your
@@ -131,9 +131,10 @@ Shortcuts below say `Ctrl`; on a Mac, `Cmd` works everywhere `Ctrl` does. Press
   to turn in 15° steps. **Crop** needs exactly one image selected.
 - **Escape:** Press `Esc` once to clear the current selection. Press it again
   when nothing is selected to switch to **Select/Move**. Mid-drag, `Esc` cancels it.
-- **Pan/zoom:** On a trackpad, scroll with two fingers to pan and pinch to zoom.
-  With a mouse, the wheel zooms and the middle button (or **Hand/Pan**) pans. The
-  zoom buttons in the bottom-right corner show the current zoom: `−`/`+` step it,
+- **Pan/zoom:** Scroll up to zoom in and down to zoom out around the pointer.
+  Trackpad scrolling and pinching also zoom. Use **Hand/Pan** to drag the view,
+  or drag with the middle mouse button to pan. The zoom buttons in the bottom-right
+  corner show the current zoom: `−`/`+` step it,
   clicking the percentage resets it to 100%, and **Fit** shows everything. The
   keyboard works too: `Ctrl+=` / `Ctrl+−` to zoom and `Ctrl+0` for 100%.
 - **Fit to view:** Press `Space` to zoom and pan so everything you have drawn fits

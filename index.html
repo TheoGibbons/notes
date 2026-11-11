@@ -6960,43 +6960,17 @@
     zoomResetButton.addEventListener("click", () => setZoom(1));
     zoomFitButton.addEventListener("click", () => zoomToFitShapes());
 
-    // A notched mouse wheel zooms a step at a time. Trackpads send a stream
-    // of small, often diagonal, deltas: two fingers pan and a pinch (which
-    // browsers report as Ctrl+wheel) zooms smoothly.
-    function looksLikeMouseWheel(e) {
-        if (e.deltaMode !== 0) return true;            // whole lines or pages (Firefox)
-        if (e.deltaX !== 0) return false;              // sideways movement: a trackpad
-        const legacyDelta = e.wheelDeltaY;
-        if (typeof legacyDelta === "number" && legacyDelta !== 0) {
-            if (legacyDelta === -3 * e.deltaY) return false; // macOS trackpad (Chrome, Safari)
-            return legacyDelta % 120 === 0;            // wheel notches come in steps of 120
-        }
-        return Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50;
-    }
-
-    // One gesture produces many events; classify the first and stick with it,
-    // so a stray event mid-swipe can't flip a pan into a zoom.
-    let lastWheelGesture = { time: 0, isMouse: false };
+    // Wheel input always zooms: browsers don't reliably distinguish mouse
+    // wheels from trackpad scrolling. Pinches (Ctrl+wheel) zoom smoothly.
     let safariGestureStartScale = null;
 
     canvas.addEventListener("wheel", (e) => {
         e.preventDefault();
         closeContextMenu();
 
-        const now = performance.now();
-        const continuing = now - lastWheelGesture.time < 150;
-        const isMouse = continuing ? lastWheelGesture.isMouse : looksLikeMouseWheel(e);
-        lastWheelGesture = { time: now, isMouse };
-
         const rect = getCanvasRect();
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
-
-        if (isMouse) {
-            if (e.deltaY === 0) return;
-            zoomBy(e.deltaY < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP, sx, sy);
-            return;
-        }
 
         if (e.ctrlKey || e.metaKey) {
             // Safari reports pinches as gesture events, handled below.
@@ -7006,17 +6980,8 @@
             return;
         }
 
-        let dx = e.deltaX;
-        let dy = e.deltaY;
-        if (e.shiftKey && dx === 0) {
-            dx = dy;
-            dy = 0;
-        }
-        const scale = camera.scale || 1;
-        camera.x += dx / scale;
-        camera.y += dy / scale;
-        render();
-        repositionTextEditor();
+        if (e.deltaY === 0) return;
+        zoomBy(e.deltaY < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP, sx, sy);
     }, { passive: false });
 
     // Safari's trackpad pinch.
@@ -7479,7 +7444,7 @@
                     [`${mod}+= / ${mod}+−`, "Zoom in / out"],
                     [`${mod}+0`, "Zoom to 100%"],
                     ["Mouse wheel", "Zoom", true],
-                    ["Two-finger scroll", "Pan (trackpad)", true],
+                    ["Two-finger scroll", "Zoom (trackpad)", true],
                     ["Pinch", "Zoom (trackpad)", true],
                     ["Middle-drag", "Pan", true],
                 ],
